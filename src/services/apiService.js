@@ -1,22 +1,43 @@
-/**
- * API Service for Cricket Scoring Engine
- */
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
+
+export async function fetchTeams() {
+  try {
+    const res = await fetch(`${API_BASE}/api/teams`);
+    if (!res.ok) throw new Error('Failed to fetch teams');
+    return res.json();
+  } catch (err) {
+    console.warn('fetchTeams failed:', err.message);
+    return [];
+  }
+}
+
+export async function fetchTeamPlayers(teamId) {
+  try {
+    if (!teamId) return [];
+    const res = await fetch(`${API_BASE}/api/teams/${teamId}/players`);
+    if (!res.ok) throw new Error('Failed to fetch team players');
+    return res.json();
+  } catch (err) {
+    console.warn('fetchTeamPlayers failed:', err.message);
+    return [];
+  }
+}
 
 export async function fetchMatches(view = 'live') {
-  const res = await fetch(`/api/matches?view=${view}`);
+  const res = await fetch(`${API_BASE}/api/matches?view=${view}`);
   if (!res.ok) throw new Error('Failed to fetch matches');
   return res.json();
 }
 
 export async function fetchMatchState(matchId) {
-  const res = await fetch(`/api/matches/${matchId}/state`);
+  const res = await fetch(`${API_BASE}/api/matches/${matchId}/state`);
   if (!res.ok) throw new Error('Failed to fetch match state');
   return res.json();
 }
 
 export async function fetchFixtures() {
   try {
-    const res = await fetch('/api/fixtures');
+    const res = await fetch(`${API_BASE}/api/fixtures`);
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}: Failed to fetch fixtures`);
     }
@@ -36,7 +57,7 @@ export async function fetchFixtures() {
 }
 
 export async function createMatch(payload) {
-  const res = await fetch('/api/matches/create', {
+  const res = await fetch(`${API_BASE}/api/matches/create`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
@@ -47,7 +68,7 @@ export async function createMatch(payload) {
 }
 
 export async function authenticateScorer(matchId, pin) {
-  const res = await fetch(`/api/matches/${matchId}/auth`, {
+  const res = await fetch(`${API_BASE}/api/matches/${matchId}/auth`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ pin })
@@ -58,7 +79,7 @@ export async function authenticateScorer(matchId, pin) {
 }
 
 export async function recordBall(matchId, ballData, token) {
-  const res = await fetch(`/api/matches/${matchId}/ball`, {
+  const res = await fetch(`${API_BASE}/api/matches/${matchId}/ball`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -72,7 +93,7 @@ export async function recordBall(matchId, ballData, token) {
 }
 
 export async function undoBall(matchId, token) {
-  const res = await fetch(`/api/matches/${matchId}/undo`, {
+  const res = await fetch(`${API_BASE}/api/matches/${matchId}/undo`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -85,7 +106,7 @@ export async function undoBall(matchId, token) {
 }
 
 export async function startSecondInnings(matchId, innData, token) {
-  const res = await fetch(`/api/matches/${matchId}/start-second-innings`, {
+  const res = await fetch(`${API_BASE}/api/matches/${matchId}/start-second-innings`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -97,3 +118,4 @@ export async function startSecondInnings(matchId, innData, token) {
   if (!res.ok) throw new Error(data.error || 'Failed to start 2nd innings');
   return data;
 }
+

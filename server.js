@@ -1,101 +1,31 @@
 import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
-import Database from 'better-sqlite3';
+import mongoose from 'mongoose';
 import crypto from 'crypto';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import cors from 'cors';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { normalizeTeamName, TEAM_ALIASES } from './src/config/teamConfig.js';
+import { Match } from './src/models/Match.js';
+import { Innings } from './src/models/Innings.js';
+import { Ball } from './src/models/Ball.js';
+import { BallAudit } from './src/models/BallAudit.js';
 
 const PORT = process.env.PORT || 3001;
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://samayagrawaldev_db_user:f1UOqEYluKLiLywf@playerauction.vyihe5e.mongodb.net/?appName=playerAuction';
+const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || '*';
+
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
-    origin: '*',
+    origin: CLIENT_ORIGIN,
     methods: ['GET', 'POST']
   }
 });
 
+app.use(cors({ origin: CLIENT_ORIGIN, credentials: true }));
 app.use(express.json());
-
-// Initialize SQLite Database
-const db = new Database(path.join(__dirname, 'cricket_scoring.db'));
-db.pragma('journal_mode = WAL');
-
-// Create Database Tables
-db.exec(`
-  CREATE TABLE IF NOT EXISTS matches (
-    id TEXT PRIMARY KEY,
-    tournament_name TEXT,
-    group_label TEXT,
-    ground TEXT,
-    city TEXT,
-    details TEXT,
-    date TEXT,
-    time TEXT,
-    total_overs INTEGER,
-    players_per_side INTEGER,
-    team_a_json TEXT,
-    team_b_json TEXT,
-    toss_winner TEXT,
-    toss_choice TEXT,
-    pin_hash TEXT,
-    active_scorer_token TEXT,
-    status TEXT,
-    created_at INTEGER
-  );
-
-  CREATE TABLE IF NOT EXISTS innings (
-    id TEXT PRIMARY KEY,
-    match_id TEXT,
-    innings_num INTEGER,
-    batting_team TEXT,
-    bowling_team TEXT,
-    target INTEGER,
-    opening_batter1 TEXT,
-    opening_batter2 TEXT,
-    opening_bowler TEXT,
-    is_completed INTEGER,
-    created_at INTEGER
-  );
-
-  CREATE TABLE IF NOT EXISTS balls (
-    id TEXT PRIMARY KEY,
-    match_id TEXT,
-    innings_num INTEGER,
-    ball_index INTEGER,
-    over_num INTEGER,
-    ball_num INTEGER,
-    striker TEXT,
-    non_striker TEXT,
-    bowler TEXT,
-    runs_bat INTEGER,
-    is_wide INTEGER,
-    is_no_ball INTEGER,
-    is_bye INTEGER,
-    is_leg_bye INTEGER,
-    extra_runs INTEGER,
-    is_wicket INTEGER,
-    dismissal_type TEXT,
-    dismissed_player TEXT,
-    fielder TEXT,
-    next_batter TEXT,
-    next_bowler TEXT,
-    commentary_text TEXT,
-    timestamp INTEGER
-  );
-
-  CREATE TABLE IF NOT EXISTS audit_logs (
-    id TEXT PRIMARY KEY,
-    match_id TEXT,
-    action TEXT,
-    details_json TEXT,
-    timestamp INTEGER
-  );
-`);
 
 // PIN Hashing helper
 function hashPin(pin) {
@@ -112,85 +42,58 @@ function formatOvers(legalBalls) {
   return `${overs}.${remainder}`;
 }
 
+// Connect to MongoDB Atlas
+console.log('Connecting to MongoDB Atlas...');
+mongoose.connect(MONGODB_URI)
+  .then(() => {
+    console.log('MongoDB Atlas connection established.');
+    seedDefaultData();
+  })
+  .catch(err => {
+    console.error('MongoDB Atlas Connection Failure:', err);
+  });
+
 // PURE FUNCTION: computeMatchState(matchRecord, inningsList, ballsList)
 export function computeMatchState(matchRecord, inningsList = [], ballsList = []) {
   const matchId = matchRecord.id;
-  const teamA = typeof matchRecord.team_a_json === 'string' ? JSON.parse(matchRecord.team_a_json) : matchRecord.team_a_json;
-  const teamB = typeof matchRecord.team_b_json === 'string' ? JSON.parse(matchRecord.team_b_json) : matchRecord.team_b_json;
-  const totalOvers = matchRecord.total_overs || 20;
-  const playersPerSide = matchRecord.players_per_side || 11;
-  const maxWickets = playersPerSide - 1;
+  const teamA = matchRecord.teamA;
+  const teamB = matchRecord.teamB;
+  const totalOvers = matchRecord.totalOvers || 20;
 
-  // Determine which team bats first based on toss
-  let tossWinner = matchRecord.toss_winner || teamA.name;
-  let tossChoice = matchRecord.toss_choice || 'bat';
-  let firstBattingTeamName = tossChoice === 'bat' ? tossWinner : (tossWinner === teamA.name ? teamB.name : teamA.name);
-  let firstBowlingTeamName = firstBattingTeamName === teamA.name ? teamB.name : teamA.name;
+  const currentInningsRecord = inningsList.find(i => !i.isCompleted) || inningsList[inningsList.length - 1] || null;
+  const inningsNum = currentInningsRecord ? currentInningsRecord.inningsNum : 1;
 
-  let tossText = `${tossWinner} won the toss and elected to ${tossChoice}`;
+  const inn1Record = inningsList.find(i => i.inningsNum === 1);
+  const inn2Record = inningsList.find(i => i.inningsNum === 2);
 
-  // Process Innings 1 & 2
-  const inningsStats = [1, 2].map((innNum) => {
-    const innRecord = inningsList.find(i => i.innings_num === innNum);
-    const battingTeamName = innNum === 1 ? firstBattingTeamName : firstBowlingTeamName;
-    const bowlingTeamName = innNum === 1 ? firstBowlingTeamName : firstBattingTeamName;
-    const battingTeamDef = battingTeamName === teamA.name ? teamA : teamB;
-    const bowlingTeamDef = bowlingTeamName === teamA.name ? teamA : teamB;
+  const battingTeamName = currentInningsRecord ? currentInningsRecord.battingTeam : teamA.name;
+  const bowlingTeamName = currentInningsRecord ? currentInningsRecord.bowlingTeam : teamB.name;
 
-    const squadBatting = battingTeamDef.squad || [];
-    const squadBowling = bowlingTeamDef.squad || [];
+  const battingTeamObj = teamA.name === battingTeamName ? teamA : teamB;
+  const bowlingTeamObj = teamA.name === bowlingTeamName ? teamA : teamB;
 
-    const innBalls = ballsList
-      .filter(b => b.innings_num === innNum)
-      .sort((a, b) => a.ball_index - b.ball_index);
+  const isTeamABatting = teamA.name === battingTeamName;
+  const isTeamBBatting = teamB.name === battingTeamName;
 
-    // Initial state tracking for innings
-    let totalRuns = 0;
-    let wickets = 0;
-    let legalBalls = 0;
-    let extras = { wide: 0, noBall: 0, bye: 0, legBye: 0, penalty: 0 };
-    
-    // Batter stats map: name -> { runs, balls, fours, sixes, dismissal, isNotOut, order }
+  const squadBat = battingTeamObj.squad && battingTeamObj.squad.length > 0
+    ? battingTeamObj.squad
+    : ['Batter 1', 'Batter 2', 'Batter 3', 'Batter 4', 'Batter 5', 'Batter 6', 'Batter 7', 'Batter 8', 'Batter 9', 'Batter 10', 'Batter 11'];
+
+  const squadBowl = bowlingTeamObj.squad && bowlingTeamObj.squad.length > 0
+    ? bowlingTeamObj.squad
+    : ['Bowler 1', 'Bowler 2', 'Bowler 3', 'Bowler 4', 'Bowler 5'];
+
+  // Process scorecard data for innings
+  const buildInningsScorecard = (iNum, teamBatObj, teamBowlObj, innRec) => {
+    if (!innRec && iNum === 2) return null;
+
+    const innBalls = ballsList.filter(b => b.inningsNum === iNum);
     const batterMap = new Map();
-    squadBatting.forEach((name, idx) => {
-      batterMap.set(name, {
-        name,
-        dismissal: 'yet to bat',
-        runs: 0,
-        balls: 0,
-        fours: 0,
-        sixes: 0,
-        sr: '0.00',
-        isNotOut: false,
-        hasBatted: false,
-        order: idx
-      });
-    });
-
-    // Bowler stats map: name -> { overs, maidens, runs, wickets, econ, wd, nb, legalBalls, overRuns, overWickets }
     const bowlerMap = new Map();
-    squadBowling.forEach(name => {
-      bowlerMap.set(name, {
-        name,
-        overs: '0.0',
-        legalBalls: 0,
-        maidens: 0,
-        runs: 0,
-        wickets: 0,
-        econ: '0.00',
-        wd: 0,
-        nb: 0,
-        overRuns: 0,
-        overWickets: 0,
-        hasBowled: false
-      });
-    });
 
-    // Active players tracking
-    let currentStriker = innRecord?.opening_batter1 || squadBatting[0] || 'Batter 1';
-    let currentNonStriker = innRecord?.opening_batter2 || squadBatting[1] || 'Batter 2';
-    let currentBowlerName = innRecord?.opening_bowler || squadBowling[0] || 'Bowler 1';
-    let previousBowlerName = null;
+    let currentStriker = innRec ? innRec.openingBatter1 : squadBat[0];
+    let currentNonStriker = innRec ? innRec.openingBatter2 : squadBat[1];
+    let currentBowlerName = innRec ? innRec.openingBowler : squadBowl[0];
 
     if (batterMap.has(currentStriker)) {
       const b = batterMap.get(currentStriker);
@@ -210,22 +113,19 @@ export function computeMatchState(matchRecord, inningsList = [], ballsList = [])
     const recentBallsList = [];
     let isFreeHit = false;
 
-    // Process each ball
     innBalls.forEach((b) => {
-      const isWide = Boolean(b.is_wide);
-      const isNoBall = Boolean(b.is_no_ball);
-      const isBye = Boolean(b.is_bye);
-      const isLegBye = Boolean(b.is_leg_bye);
-      const isWicket = Boolean(b.is_wicket);
-      const runsBat = b.runs_bat || 0;
-      const extraRuns = b.extra_runs || 0;
+      const isWide = Boolean(b.isWide);
+      const isNoBall = Boolean(b.isNoBall);
+      const isBye = Boolean(b.isBye);
+      const isLegBye = Boolean(b.isLegBye);
+      const isWicket = Boolean(b.isWicket);
+      const runsBat = b.runsBat || 0;
+      const extraRuns = b.extraRuns || 0;
 
-      // Update current active players from ball record if present
       if (b.striker) currentStriker = b.striker;
-      if (b.non_striker) currentNonStriker = b.non_striker;
+      if (b.nonStriker) currentNonStriker = b.nonStriker;
       if (b.bowler) currentBowlerName = b.bowler;
 
-      // Ensure batter & bowler records exist
       if (!batterMap.has(currentStriker)) {
         batterMap.set(currentStriker, { name: currentStriker, dismissal: 'not out', runs: 0, balls: 0, fours: 0, sixes: 0, sr: '0.00', isNotOut: true, hasBatted: true, order: 99 });
       }
@@ -248,1012 +148,845 @@ export function computeMatchState(matchRecord, inningsList = [], ballsList = [])
       if (isWide) {
         const widePen = 1 + extraRuns;
         ballTotalRuns = widePen;
-        totalRuns += widePen;
-        extras.wide += widePen;
         bowlerObj.runs += widePen;
         bowlerObj.wd += 1;
-        bowlerObj.overRuns += widePen;
-        valLabel = extraRuns > 0 ? `Wd+${extraRuns}` : 'Wd';
+        valLabel = widePen > 1 ? `${widePen}Wd` : 'Wd';
         ballType = 'wide';
-
-        // Wide odd runs swap strike
-        if (extraRuns % 2 === 1) {
-          const temp = currentStriker;
-          currentStriker = currentNonStriker;
-          currentNonStriker = temp;
-        }
       } else if (isNoBall) {
         const nbPen = 1 + runsBat + extraRuns;
         ballTotalRuns = nbPen;
-        totalRuns += nbPen;
-        extras.noBall += 1;
-        if (extraRuns > 0) extras.bye += extraRuns;
-        
         strikerObj.runs += runsBat;
+        strikerObj.balls += 1;
         if (runsBat === 4) strikerObj.fours += 1;
         if (runsBat === 6) strikerObj.sixes += 1;
-        
         bowlerObj.runs += nbPen;
         bowlerObj.nb += 1;
-        bowlerObj.overRuns += nbPen;
-
-        valLabel = runsBat > 0 ? `Nb+${runsBat}` : 'Nb';
-        ballType = runsBat === 4 ? 'four' : (runsBat === 6 ? 'six' : 'noball');
+        valLabel = `Nb+${runsBat}`;
+        ballType = 'noball';
         isFreeHit = true;
-
-        if (runsBat % 2 === 1) {
-          const temp = currentStriker;
-          currentStriker = currentNonStriker;
-          currentNonStriker = temp;
-        }
       } else if (isBye || isLegBye) {
-        legalBalls += 1;
-        bowlerObj.legalBalls += 1;
-        const bRuns = extraRuns || runsBat || 1;
-        ballTotalRuns = bRuns;
-        totalRuns += bRuns;
-        if (isBye) extras.bye += bRuns;
-        if (isLegBye) extras.legBye += bRuns;
-        
+        ballTotalRuns = extraRuns || 1;
         strikerObj.balls += 1;
-        bowlerObj.overRuns += 0; // Byes/leg-byes don't count against bowler runs
-
-        valLabel = isBye ? `B${bRuns}` : `LB${bRuns}`;
-        ballType = 'extra';
-
-        if (bRuns % 2 === 1) {
-          const temp = currentStriker;
-          currentStriker = currentNonStriker;
-          currentNonStriker = temp;
-        }
-
-        // Check over completion
-        if (bowlerObj.legalBalls % 6 === 0) {
-          if (bowlerObj.overRuns === 0) bowlerObj.maidens += 1;
-          bowlerObj.overRuns = 0;
-          bowlerObj.overWickets = 0;
-          previousBowlerName = currentBowlerName;
-          // Swap strike at end of over
-          const temp = currentStriker;
-          currentStriker = currentNonStriker;
-          currentNonStriker = temp;
-        }
+        valLabel = isBye ? `${ballTotalRuns}B` : `${ballTotalRuns}LB`;
+        ballType = 'bye';
       } else {
-        // Normal legal ball
-        legalBalls += 1;
-        bowlerObj.legalBalls += 1;
         ballTotalRuns = runsBat;
-        totalRuns += runsBat;
-
         strikerObj.runs += runsBat;
         strikerObj.balls += 1;
-        if (runsBat === 4) strikerObj.fours += 1;
-        if (runsBat === 6) strikerObj.sixes += 1;
+        if (runsBat === 4) { strikerObj.fours += 1; ballType = 'four'; }
+        else if (runsBat === 6) { strikerObj.sixes += 1; ballType = 'six'; }
+        else if (runsBat === 1) ballType = 'single';
+        else if (runsBat === 2) ballType = 'double';
+        else if (runsBat === 3) ballType = 'triple';
 
         bowlerObj.runs += runsBat;
-        bowlerObj.overRuns += runsBat;
-
-        if (runsBat === 0) ballType = 'dot';
-        else if (runsBat === 4) ballType = 'four';
-        else if (runsBat === 6) ballType = 'six';
-        else if (runsBat % 2 === 1) ballType = 'single';
-        else ballType = 'double';
-
-        valLabel = String(runsBat);
+        bowlerObj.legalBalls += 1;
         isFreeHit = false;
-
-        // Wicket processing
-        if (isWicket) {
-          wickets += 1;
-          ballType = 'wicket';
-          valLabel = 'W';
-
-          const dismissedName = b.dismissed_player || currentStriker;
-          const dismissalType = b.dismissal_type || 'bowled';
-          const fielderName = b.fielder || '';
-
-          if (dismissalType !== 'run_out') {
-            bowlerObj.wickets += 1;
-            bowlerObj.overWickets += 1;
-          }
-
-          let disText = 'out';
-          if (dismissalType === 'bowled') disText = `b ${currentBowlerName}`;
-          else if (dismissalType === 'caught') disText = `c ${fielderName || 'fielder'} b ${currentBowlerName}`;
-          else if (dismissalType === 'lbw') disText = `lbw b ${currentBowlerName}`;
-          else if (dismissalType === 'run_out') disText = `run out (${fielderName || 'fielder'})`;
-          else if (dismissalType === 'stumped') disText = `stumped ${fielderName || 'fielder'} b ${currentBowlerName}`;
-          else disText = `${dismissalType} b ${currentBowlerName}`;
-
-          const targetBatterObj = batterMap.get(dismissedName) || strikerObj;
-          targetBatterObj.dismissal = disText;
-          targetBatterObj.isNotOut = false;
-
-          fallOfWicketsArr.push(`${totalRuns}-${wickets} (${dismissedName}, ${formatOvers(legalBalls)} ov)`);
-
-          // Bring in new batter if provided
-          if (b.next_batter) {
-            if (dismissedName === currentStriker) {
-              currentStriker = b.next_batter;
-            } else {
-              currentNonStriker = b.next_batter;
-            }
-            if (batterMap.has(b.next_batter)) {
-              const nbObj = batterMap.get(b.next_batter);
-              nbObj.hasBatted = true;
-              nbObj.isNotOut = true;
-              nbObj.dismissal = 'not out';
-            }
-          }
-        }
-
-        // Swap strike on odd runs
-        if (!isWicket && runsBat % 2 === 1) {
-          const temp = currentStriker;
-          currentStriker = currentNonStriker;
-          currentNonStriker = temp;
-        }
-
-        // Over completion check
-        if (bowlerObj.legalBalls % 6 === 0) {
-          if (bowlerObj.overRuns === 0) bowlerObj.maidens += 1;
-          bowlerObj.overRuns = 0;
-          bowlerObj.overWickets = 0;
-          previousBowlerName = currentBowlerName;
-
-          // Swap strike at end of over
-          const temp = currentStriker;
-          currentStriker = currentNonStriker;
-          currentNonStriker = temp;
-
-          if (b.next_bowler) {
-            currentBowlerName = b.next_bowler;
-          }
-        }
       }
 
-      // Update bowler overs display & econ
-      bowlerObj.overs = formatOvers(bowlerObj.legalBalls);
-      const bowOversFloat = bowlerObj.legalBalls / 6;
-      bowlerObj.econ = bowOversFloat > 0 ? (bowlerObj.runs / bowOversFloat).toFixed(2) : '0.00';
-
-      // Update striker strike rate
       if (strikerObj.balls > 0) {
         strikerObj.sr = ((strikerObj.runs / strikerObj.balls) * 100).toFixed(2);
       }
 
-      // Build commentary item
-      const currentOverStr = formatOvers(legalBalls);
-      let commText = b.commentary_text;
-      if (!commText) {
-        if (isWicket) commText = `OUT! ${b.dismissed_player || currentStriker} ${b.dismissal_type || 'dismissed'}!`;
-        else if (isWide) commText = `${currentBowlerName} to ${currentStriker}, Wide ball (+${1 + extraRuns} run)`;
-        else if (isNoBall) commText = `${currentBowlerName} to ${currentStriker}, NO BALL! ${runsBat} runs taken. Next ball is a Free Hit!`;
-        else if (runsBat === 6) commText = `SIX! ${currentStriker} smashes ${currentBowlerName} over the boundary!`;
-        else if (runsBat === 4) commText = `FOUR! Beautiful placement by ${currentStriker} off ${currentBowlerName}!`;
-        else commText = `${currentBowlerName} to ${currentStriker}, ${runsBat} run${runsBat === 1 ? '' : 's'}.`;
+      if (isWicket) {
+        strikerObj.isNotOut = false;
+        const dismissed = b.dismissedPlayer || currentStriker;
+        const dObj = batterMap.get(dismissed) || strikerObj;
+        dObj.isNotOut = false;
+
+        const dType = b.dismissalType || 'bowled';
+        const fielder = b.fielder ? ` c ${b.fielder}` : '';
+        if (dType === 'bowled') dObj.dismissal = `b ${currentBowlerName}`;
+        else if (dType === 'caught') dObj.dismissal = `c ${b.fielder || 'fielder'} b ${currentBowlerName}`;
+        else if (dType === 'lbw') dObj.dismissal = `lbw b ${currentBowlerName}`;
+        else if (dType === 'run_out') dObj.dismissal = `run out (${b.fielder || ''})`;
+        else if (dType === 'stumped') dObj.dismissal = `stumped b ${currentBowlerName}`;
+        else dObj.dismissal = `${dType} b ${currentBowlerName}`;
+
+        if (dType !== 'run_out') {
+          bowlerObj.wickets += 1;
+        }
+
+        const totalWicketsSoFar = Array.from(batterMap.values()).filter(x => !x.isNotOut).length;
+        const currentTotalRuns = Array.from(batterMap.values()).reduce((acc, curr) => acc + curr.runs, 0) +
+          Array.from(bowlerMap.values()).reduce((acc, curr) => acc + (curr.wd + curr.nb), 0);
+
+        fallOfWicketsArr.push({
+          score: currentTotalRuns,
+          wicketNum: totalWicketsSoFar,
+          player: dismissed,
+          over: formatOvers(bowlerObj.legalBalls)
+        });
+
+        valLabel = 'W';
+        ballType = 'wicket';
       }
 
+      bowlerObj.overs = formatOvers(bowlerObj.legalBalls);
+      const totalBowlerOversFloat = bowlerObj.legalBalls / 6;
+      bowlerObj.econ = totalBowlerOversFloat > 0 ? (bowlerObj.runs / totalBowlerOversFloat).toFixed(2) : '0.00';
+
+      const ballDisplayOver = formatOvers(b.ballIndex - 1);
       commentaryList.unshift({
-        ball: currentOverStr,
+        ball: ballDisplayOver,
         runs: ballTotalRuns,
         isWicket,
         isBoundary: runsBat === 4 || runsBat === 6,
-        text: commText,
+        text: b.commentaryText || `${currentBowlerName} to ${currentStriker}, ${valLabel}`,
         type: ballType
       });
 
       recentBallsList.push({
-        ball: currentOverStr,
+        ball: ballDisplayOver,
         val: valLabel,
         type: ballType
       });
-
-      // Add over summary divider to recent balls
-      if (legalBalls > 0 && legalBalls % 6 === 0 && !isWide && !isNoBall) {
-        recentBallsList.push({ type: 'over_boundary', label: 'divider' });
-      }
     });
 
-    // Finalize batter SR & dismissal texts
-    const battingList = Array.from(batterMap.values())
-      .filter(b => b.hasBatted)
-      .map(b => ({
-        name: b.name,
-        dismissal: b.dismissal,
-        runs: b.runs,
-        balls: b.balls,
-        fours: b.fours,
-        sixes: b.sixes,
-        sr: b.balls > 0 ? ((b.runs / b.balls) * 100).toFixed(2) : '0.00',
-        isNotOut: b.isNotOut
-      }));
+    const battersList = Array.from(batterMap.values());
+    const bowlersList = Array.from(bowlerMap.values());
 
-    const didNotBatList = Array.from(batterMap.values())
-      .filter(b => !b.hasBatted)
-      .map(b => b.name);
+    const totalRunsFromBat = battersList.reduce((acc, b) => acc + b.runs, 0);
+    const totalWides = bowlersList.reduce((acc, b) => acc + b.wd, 0);
+    const totalNoBalls = bowlersList.reduce((acc, b) => acc + b.nb, 0);
+    const totalExtras = totalWides + totalNoBalls;
+    const totalRuns = totalRunsFromBat + totalExtras;
+    const totalWickets = battersList.filter(b => !b.isNotOut).length;
 
-    const bowlingList = Array.from(bowlerMap.values())
-      .filter(b => b.hasBowled || b.name === currentBowlerName)
-      .map(b => ({
-        name: b.name,
-        overs: formatOvers(b.legalBalls),
-        maidens: b.maidens,
-        runs: b.runs,
-        wickets: b.wickets,
-        econ: (b.legalBalls / 6) > 0 ? (b.runs / (b.legalBalls / 6)).toFixed(2) : '0.00',
-        wd: b.wd,
-        nb: b.nb
-      }));
-
-    const extrasText = `${extras.wide + extras.noBall + extras.bye + extras.legBye} (b ${extras.bye}, lb ${extras.legBye}, w ${extras.wide}, nb ${extras.noBall})`;
-    const oversText = formatOvers(legalBalls);
-    const rrFloat = legalBalls > 0 ? (totalRuns / (legalBalls / 6)).toFixed(2) : '0.00';
-    const scoreText = `${totalRuns}/${wickets} (${oversText} Ov)`;
-    const totalLineText = `${totalRuns}/${wickets} (${oversText} Overs, RR ${rrFloat})`;
-
-    const isCompleted = innRecord?.is_completed || (legalBalls >= totalOvers * 6) || (wickets >= maxWickets);
+    const totalLegalBalls = bowlersList.reduce((acc, b) => acc + b.legalBalls, 0);
+    const totalOversFormatted = formatOvers(totalLegalBalls);
 
     return {
-      inningsNum: innNum,
-      teamName: battingTeamName,
-      bowlingTeamName: bowlingTeamName,
-      shortName: battingTeamDef.shortName || battingTeamName.slice(0, 3).toUpperCase(),
-      scoreText,
+      inningsNum: iNum,
+      teamName: teamBatObj.name,
+      shortName: teamBatObj.shortName,
+      scoreText: `${totalRuns}/${totalWickets} (${totalOversFormatted} Ov)`,
       totalRuns,
-      wickets,
-      legalBalls,
-      oversText,
-      rrFloat,
-      batting: battingList,
-      bowling: bowlingList,
-      extras: extrasText,
-      total: totalLineText,
-      didNotBat: didNotBatList,
-      fallOfWickets: fallOfWicketsArr.join(', '),
+      totalWickets,
+      totalOversFormatted,
+      totalLegalBalls,
+      batting: battersList,
+      bowling: bowlersList,
+      extras: `${totalExtras} (w ${totalWides}, nb ${totalNoBalls})`,
+      fallOfWickets: fallOfWicketsArr.map(f => `${f.score}-${f.wicketNum} (${f.player}, ${f.over} ov)`).join(', '),
+      commentary: commentaryList,
+      recentBalls: recentBallsList,
       currentStriker,
       currentNonStriker,
       currentBowlerName,
-      previousBowlerName,
-      commentary: commentaryList,
-      recentBalls: recentBallsList,
-      isCompleted,
-      target: innRecord?.target || null
+      isFreeHit: Boolean(isFreeHit)
     };
-  });
-
-  const inn1 = inningsStats[0];
-  const inn2 = inningsStats[1];
-
-  // Current active innings determination
-  let currentInningsIndex = 1;
-  if (inn1.isCompleted || ballsList.some(b => b.innings_num === 2) || inningsList.some(i => i.innings_num === 2)) {
-    currentInningsIndex = 2;
-  }
-
-  const activeInn = currentInningsIndex === 1 ? inn1 : inn2;
-  const target = inn1.totalRuns + 1;
-
-  // Check match completion status
-  let isMatchCompleted = matchRecord.status === 'completed';
-  let resultText = null;
-  let chaseStatusText = null;
-
-  if (currentInningsIndex === 2) {
-    const runsNeeded = target - inn2.totalRuns;
-    const ballsRemaining = (totalOvers * 6) - inn2.legalBalls;
-
-    if (inn2.totalRuns >= target) {
-      isMatchCompleted = true;
-      const wksRemaining = maxWickets - inn2.wickets;
-      resultText = `${inn2.teamName} won by ${wksRemaining} wicket${wksRemaining !== 1 ? 's' : ''}`;
-    } else if (inn2.isCompleted || ballsRemaining <= 0 || inn2.wickets >= maxWickets) {
-      isMatchCompleted = true;
-      if (inn2.totalRuns === target - 1) {
-        resultText = 'Match tied';
-      } else if (inn2.totalRuns < target - 1) {
-        const marginRuns = (target - 1) - inn2.totalRuns;
-        resultText = `${inn1.teamName} won by ${marginRuns} run${marginRuns !== 1 ? 's' : ''}`;
-      }
-    } else {
-      const rrrFloat = ballsRemaining > 0 ? ((runsNeeded / ballsRemaining) * 6).toFixed(2) : '0.00';
-      chaseStatusText = `${inn2.teamName} need ${runsNeeded} run${runsNeeded !== 1 ? 's' : ''} off ${ballsRemaining} ball${ballsRemaining !== 1 ? 's' : ''} (RRR ${rrrFloat})`;
-    }
-  }
-
-  let matchStatus = matchRecord.status;
-  if (isMatchCompleted) {
-    matchStatus = 'completed';
-  } else if (ballsList.length > 0 || currentInningsIndex === 2) {
-    matchStatus = 'live';
-  }
-
-  // Header Team A and Team B states
-  const teamABattingInn = inn1.teamName === teamA.name ? inn1 : inn2;
-  const teamBBattingInn = inn1.teamName === teamB.name ? inn1 : inn2;
-
-  const teamAHeader = {
-    name: teamA.name,
-    shortName: teamA.shortName || teamA.name.slice(0, 3).toUpperCase(),
-    logoColor: teamA.logoColor || '#dc2626',
-    logoText: teamA.logoText || teamA.name.charAt(0),
-    score: teamABattingInn.legalBalls > 0 || teamABattingInn.wickets > 0 || currentInningsIndex === (inn1.teamName === teamA.name ? 1 : 2) ? `${teamABattingInn.totalRuns}/${teamABattingInn.wickets}` : null,
-    overs: teamABattingInn.legalBalls > 0 ? `${teamABattingInn.oversText} ov` : null,
-    hasBatted: teamABattingInn.legalBalls > 0 || teamABattingInn.wickets > 0,
-    isBatting: matchStatus === 'live' && activeInn.teamName === teamA.name
   };
 
-  const teamBHeader = {
-    name: teamB.name,
-    shortName: teamB.shortName || teamB.name.slice(0, 3).toUpperCase(),
-    logoColor: teamB.logoColor || '#059669',
-    logoText: teamB.logoText || teamB.name.charAt(0),
-    score: teamBBattingInn.legalBalls > 0 || teamBBattingInn.wickets > 0 || currentInningsIndex === (inn1.teamName === teamB.name ? 1 : 2) ? `${teamBBattingInn.totalRuns}/${teamBBattingInn.wickets}` : null,
-    overs: teamBBattingInn.legalBalls > 0 ? `${teamBBattingInn.oversText} ov` : null,
-    hasBatted: teamBBattingInn.legalBalls > 0 || teamBBattingInn.wickets > 0,
-    isBatting: matchStatus === 'live' && activeInn.teamName === teamB.name
-  };
+  const inn1Data = buildInningsScorecard(1, isTeamABatting ? teamA : teamB, isTeamABatting ? teamB : teamA, inn1Record);
+  const inn2Data = buildInningsScorecard(2, isTeamABatting ? teamB : teamA, isTeamABatting ? teamA : teamB, inn2Record);
 
-  // Live Tab batters & bowler info
-  const strikerName = activeInn.currentStriker;
-  const nonStrikerName = activeInn.currentNonStriker;
-  const strikerObj = activeInn.batting.find(b => b.name === strikerName) || { name: strikerName, runs: 0, balls: 0, fours: 0, sixes: 0, sr: '0.00' };
-  const nonStrikerObj = activeInn.batting.find(b => b.name === nonStrikerName) || { name: nonStrikerName, runs: 0, balls: 0, fours: 0, sixes: 0, sr: '0.00' };
+  const activeInnData = inningsNum === 2 ? (inn2Data || inn1Data) : inn1Data;
 
-  const currentBatters = [
-    { ...strikerObj, isStriker: true },
-    { ...nonStrikerObj, isStriker: false }
-  ];
+  const currentBatters = activeInnData ? [
+    activeInnData.batting.find(b => b.name === activeInnData.currentStriker) || { name: activeInnData.currentStriker || squadBat[0], runs: 0, balls: 0, fours: 0, sixes: 0, sr: '0.00', isStriker: true },
+    activeInnData.batting.find(b => b.name === activeInnData.currentNonStriker) || { name: activeInnData.currentNonStriker || squadBat[1], runs: 0, balls: 0, fours: 0, sixes: 0, sr: '0.00', isStriker: false }
+  ].map((b, i) => ({ ...b, isStriker: i === 0 })) : [];
 
-  const currentBowlerObj = activeInn.bowling.find(b => b.name === activeInn.currentBowlerName) || {
-    name: activeInn.currentBowlerName,
+  const currentBowler = activeInnData ? (activeInnData.bowling.find(b => b.name === activeInnData.currentBowlerName) || {
+    name: activeInnData.currentBowlerName || squadBowl[0],
     overs: '0.0',
     maidens: 0,
     runs: 0,
     wickets: 0,
     econ: '0.00'
-  };
+  }) : null;
 
-  // Recent balls calculation (last 14 balls)
-  const recentBalls = activeInn.recentBalls.slice(-14);
+  const currentPartnership = activeInnData ? {
+    runs: currentBatters.reduce((acc, b) => acc + (b.runs || 0), 0),
+    balls: currentBatters.reduce((acc, b) => acc + (b.balls || 0), 0)
+  } : { runs: 0, balls: 0 };
 
-  // Status strip text for home page cards
-  let statusStripText = tossText;
-  let statusStripBold = tossWinner;
-  let statusStripType = 'toss';
+  const currentRR = activeInnData && activeInnData.totalLegalBalls > 0
+    ? ((activeInnData.totalRuns / (activeInnData.totalLegalBalls / 6))).toFixed(2)
+    : '0.00';
 
-  if (matchStatus === 'completed') {
-    statusStripText = resultText || 'Match completed';
-    statusStripBold = resultText ? resultText.split(' ')[0] : '';
-    statusStripType = 'result';
-  } else if (currentInningsIndex === 2 && chaseStatusText) {
-    statusStripText = chaseStatusText;
-    statusStripBold = inn2.teamName;
-    statusStripType = 'progress';
-  } else if (activeInn.legalBalls > 0) {
-    statusStripText = `${activeInn.teamName} ${activeInn.totalRuns}/${activeInn.wickets} in ${activeInn.oversText} overs (RR ${activeInn.rrFloat})`;
-    statusStripBold = activeInn.teamName;
-    statusStripType = 'progress';
+  let requiredRR = '-';
+  let chaseStatusText = null;
+  let target = inn2Record ? inn2Record.target : null;
+
+  if (inningsNum === 2 && target && activeInnData) {
+    const runsNeeded = Math.max(0, target - activeInnData.totalRuns);
+    const ballsRemaining = Math.max(0, (totalOvers * 6) - activeInnData.totalLegalBalls);
+    if (ballsRemaining > 0 && runsNeeded > 0) {
+      requiredRR = ((runsNeeded / (ballsRemaining / 6))).toFixed(2);
+      chaseStatusText = `${battingTeamName} need ${runsNeeded} runs in ${ballsRemaining} balls (RRR ${requiredRR})`;
+    } else if (runsNeeded === 0) {
+      chaseStatusText = `${battingTeamName} won by ${10 - activeInnData.totalWickets} wickets!`;
+    }
   }
 
-  // Consolidated canonical MatchState
-  const fullMatchState = {
-    matchId,
-    tournamentName: matchRecord.tournament_name || 'MAPL 2026',
-    groupLabel: matchRecord.group_label || 'Group Stage',
-    roundLabel: matchRecord.group_label || 'Group Stage',
-    status: matchStatus,
-    ground: matchRecord.ground || 'Main Stadium',
-    city: matchRecord.city || 'Gandhidham',
-    details: matchRecord.details || 'T20 Match',
-    date: matchRecord.date || 'Today',
-    time: matchRecord.time || '02:30 PM IST',
-    oversLabel: `${totalOvers} Ov.`,
-    totalOvers,
-    playersPerSide,
-    tossText,
-    tossWinner,
-    tossChoice,
-    currentInningsIndex,
-    target: currentInningsIndex === 2 ? target : null,
-    chaseStatusText,
-    resultText,
-    teamA: teamAHeader,
-    teamB: teamBHeader,
-    liveData: {
-      currentBatters,
-      currentBowler: currentBowlerObj,
-      currentPartnership: { runs: activeInn.totalRuns, balls: activeInn.legalBalls },
-      recentBalls,
-      bannerText: chaseStatusText || resultText || tossText,
-      bannerType: matchStatus === 'completed' ? 'completed_result' : (currentInningsIndex === 2 ? 'live_chase' : 'live_toss')
-    },
-    scorecard: inningsStats.map(inn => ({
-      inningsNum: inn.inningsNum,
-      teamName: inn.teamName,
-      shortName: inn.shortName,
-      scoreText: inn.scoreText,
-      totalRuns: inn.totalRuns,
-      wickets: inn.wickets,
-      batting: inn.batting,
-      extras: inn.extras,
-      total: inn.total,
-      didNotBat: inn.didNotBat,
-      fallOfWickets: inn.fallOfWickets,
-      bowling: inn.bowling
-    })),
-    commentary: activeInn.commentary,
-    statusStripText,
-    statusStripBold,
-    statusStripType,
-    // Active Scorer context for prompts
-    scoringContext: {
-      currentInningsIndex,
-      isCompleted: isMatchCompleted,
-      target: currentInningsIndex === 2 ? target : null,
-      striker: activeInn.currentStriker,
-      nonStriker: activeInn.currentNonStriker,
-      bowler: activeInn.currentBowlerName,
-      previousBowler: activeInn.previousBowlerName,
-      legalBalls: activeInn.legalBalls,
-      overComplete: activeInn.legalBalls > 0 && activeInn.legalBalls % 6 === 0,
-      availableBatters: inn1.teamName === activeInn.teamName ? teamA.squad : teamB.squad,
-      availableBowlers: inn1.teamName === activeInn.teamName ? teamB.squad : teamA.squad
+  const projectedScore = activeInnData
+    ? Math.round(Number(currentRR) * totalOvers)
+    : 0;
+
+  const teamAScoreText = isTeamABatting ? activeInnData.scoreText : (inn1Data && !isTeamABatting ? inn1Data.scoreText : 'Yet to bat');
+  const teamBScoreText = isTeamBBatting ? activeInnData.scoreText : (inn1Data && !isTeamBBatting ? inn1Data.scoreText : 'Yet to bat');
+
+  return {
+    fullMatchState: {
+      matchId,
+      tournamentName: matchRecord.tournamentName || 'MAPL 2026',
+      roundLabel: matchRecord.groupLabel || 'Quarter Final 1',
+      status: matchRecord.status || 'live',
+      ground: matchRecord.ground || 'Sun Valley Ground',
+      city: matchRecord.city || 'Gandhidham',
+      date: matchRecord.date || 'Today',
+      time: matchRecord.time || 'Live',
+      oversLabel: `${totalOvers} Ov.`,
+      tossText: `${matchRecord.tossWinner} won the toss and elected to ${matchRecord.tossChoice}`,
+      tossWinner: matchRecord.tossWinner,
+      tossChoice: matchRecord.tossChoice,
+      currentInningsIndex: inningsNum,
+      chaseStatusText,
+      resultText: matchRecord.resultText,
+      teamA: {
+        id: teamA.id,
+        name: teamA.name,
+        shortName: teamA.shortName,
+        logoColor: teamA.logoColor,
+        logoText: teamA.logoText,
+        score: teamAScoreText,
+        overs: isTeamABatting ? activeInnData.totalOversFormatted : (inn1Data && !isTeamABatting ? inn1Data.totalOversFormatted : '0.0'),
+        hasBatted: isTeamABatting || (inn1Data && !isTeamABatting),
+        isBatting: isTeamABatting,
+        squad: teamA.squad
+      },
+      teamB: {
+        id: teamB.id,
+        name: teamB.name,
+        shortName: teamB.shortName,
+        logoColor: teamB.logoColor,
+        logoText: teamB.logoText,
+        score: teamBScoreText,
+        overs: isTeamBBatting ? activeInnData.totalOversFormatted : (inn1Data && !isTeamBBatting ? inn1Data.totalOversFormatted : '0.0'),
+        hasBatted: isTeamBBatting || (inn1Data && !isTeamBBatting),
+        isBatting: isTeamBBatting,
+        squad: teamB.squad
+      },
+      liveData: {
+        currentBatters,
+        currentBowler,
+        currentPartnership,
+        recentBalls: activeInnData ? activeInnData.recentBalls.slice(-12) : [],
+        bannerText: chaseStatusText || `${battingTeamName} batting at ${currentRR} RR`,
+        bannerType: inningsNum === 2 ? 'live_chase' : 'info',
+        isFreeHit: activeInnData ? activeInnData.isFreeHit : false
+      },
+      scorecard: [
+        inn1Data ? {
+          inningsNum: 1,
+          teamName: inn1Data.teamName,
+          shortName: inn1Data.shortName,
+          scoreText: inn1Data.scoreText,
+          batting: inn1Data.batting,
+          extras: inn1Data.extras,
+          total: inn1Data.scoreText,
+          fallOfWickets: inn1Data.fallOfWickets,
+          bowling: inn1Data.bowling
+        } : null,
+        inn2Data ? {
+          inningsNum: 2,
+          teamName: inn2Data.teamName,
+          shortName: inn2Data.shortName,
+          scoreText: inn2Data.scoreText,
+          batting: inn2Data.batting,
+          extras: inn2Data.extras,
+          total: inn2Data.scoreText,
+          fallOfWickets: inn2Data.fallOfWickets,
+          bowling: inn2Data.bowling
+        } : null
+      ].filter(Boolean),
+      commentary: activeInnData ? activeInnData.commentary : [],
+      squads: {
+        teamA: { name: teamA.name, players: teamA.squad.map((p, idx) => ({ name: p, role: idx === 0 ? 'Captain & Batter' : 'Player' })) },
+        teamB: { name: teamB.name, players: teamB.squad.map((p, idx) => ({ name: p, role: idx === 0 ? 'Captain & Batter' : 'Player' })) }
+      },
+      sidePanel: {
+        currentRR,
+        requiredRR,
+        target: target ? String(target) : '-',
+        projectedScore: String(projectedScore),
+        seriesName: matchRecord.tournamentName || 'MAPL 2026',
+        seriesLink: '#',
+        matchDate: matchRecord.date || 'Today',
+        location: `${matchRecord.ground}, ${matchRecord.city}`,
+        locationLink: '#',
+        lastUpdatedScorer: 'Official Umpire Panel',
+        lastUpdatedTime: 'Just now'
+      },
+      scoringContext: {
+        matchId,
+        inningsNum,
+        battingTeam: battingTeamName,
+        bowlingTeam: bowlingTeamName,
+        currentStriker: activeInnData ? activeInnData.currentStriker : squadBat[0],
+        currentNonStriker: activeInnData ? activeInnData.currentNonStriker : squadBat[1],
+        currentBowler: activeInnData ? activeInnData.currentBowlerName : squadBowl[0],
+        squadBat,
+        squadBowl,
+        overComplete: activeInnData ? (activeInnData.totalLegalBalls > 0 && activeInnData.totalLegalBalls % 6 === 0) : false,
+        wicketFallen: activeInnData && activeInnData.recentBalls.length > 0 && activeInnData.recentBalls[activeInnData.recentBalls.length - 1].type === 'wicket',
+        isFreeHit: activeInnData ? activeInnData.isFreeHit : false
+      }
     }
   };
-
-  // Compact summary for Home Page Cards
-  const matchSummary = {
-    matchId,
-    tournamentName: fullMatchState.tournamentName,
-    groupLabel: fullMatchState.groupLabel,
-    ground: fullMatchState.ground,
-    city: fullMatchState.city,
-    details: fullMatchState.details,
-    date: fullMatchState.date,
-    oversLabel: fullMatchState.oversLabel,
-    status: matchStatus,
-    teamA: teamAHeader,
-    teamB: teamBHeader,
-    statusStripText,
-    statusStripBold,
-    statusStripType
-  };
-
-  return { fullMatchState, matchSummary };
 }
 
-// Helper to get or rebuild cached match state
-function getOrRebuildMatchState(matchId) {
-  const cached = matchCache.get(matchId);
-  if (cached) return cached;
+// Helper: Rebuild full state from Mongoose models
+async function getOrRebuildMatchState(matchId) {
+  if (matchCache.has(matchId)) {
+    return matchCache.get(matchId);
+  }
 
-  const matchRecord = db.prepare('SELECT * FROM matches WHERE id = ?').get(matchId);
+  const matchRecord = await Match.findOne({ id: matchId }).lean();
   if (!matchRecord) return null;
 
-  const inningsList = db.prepare('SELECT * FROM innings WHERE match_id = ? ORDER BY innings_num ASC').all(matchId);
-  const ballsList = db.prepare('SELECT * FROM balls WHERE match_id = ? ORDER BY ball_index ASC').all(matchId);
+  const inningsList = await Innings.find({ matchId }).sort({ inningsNum: 1 }).lean();
+  const ballsList = await Ball.find({ matchId }).sort({ ballIndex: 1 }).lean();
 
   const computed = computeMatchState(matchRecord, inningsList, ballsList);
-  matchCache.set(matchId, { matchRecord, inningsList, ballsList, ...computed });
+  matchCache.set(matchId, computed);
   return computed;
 }
 
-// Broadcast real-time updates via Socket.io
+// Broadcast live match state via Socket.io
 function broadcastMatchState(matchId) {
-  const stateObj = getOrRebuildMatchState(matchId);
-  if (!stateObj) return;
-
-  // Emit full state to room
-  io.to(`match:${matchId}`).emit('state', stateObj.fullMatchState);
-
-  // Emit match summary to all viewers (Home page live update)
-  io.emit('match_summary', stateObj.matchSummary);
+  getOrRebuildMatchState(matchId).then(computed => {
+    if (computed) {
+      io.to(matchId).emit('state', computed.fullMatchState);
+    }
+  }).catch(() => {});
 }
 
-// Socket.io Room Connection logic
+function verifyScorerToken(matchRecord, token) {
+  if (!matchRecord) return false;
+  if (!matchRecord.activeScorerToken) return true;
+  return matchRecord.activeScorerToken === token;
+}
+
+// -------------------------------------------------------------
+// ENDPOINTS
+// -------------------------------------------------------------
+
+// 0. Lightweight Health Check for External Pingers (UptimeRobot / cron-job.org)
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime(), timestamp: new Date().toISOString() });
+});
+
+// 1. GET /api/teams - READ-ONLY from auctionstates collection
+app.get('/api/teams', async (req, res) => {
+  try {
+    const db = mongoose.connection.db;
+    const auctionStateDoc = await db.collection('auctionstates').findOne({});
+    if (!auctionStateDoc || !auctionStateDoc.teams) {
+      return res.json([]);
+    }
+    const teams = auctionStateDoc.teams.map(t => ({
+      id: String(t.id),
+      teamNumber: t.teamNumber,
+      name: t.name,
+      shortName: t.shortName || t.name.slice(0, 3).toUpperCase(),
+      logo: t.logo || '',
+      color: t.color || '#3b82f6',
+      owner: t.owner || ''
+    }));
+    res.json(teams);
+  } catch (err) {
+    console.error('Error fetching teams from auctionstates:', err);
+    res.status(500).json({ error: 'Failed to fetch teams' });
+  }
+});
+
+// 2. GET /api/teams/:teamId/players - READ-ONLY from players collection
+app.get('/api/teams/:teamId/players', async (req, res) => {
+  try {
+    const { teamId } = req.params;
+    const db = mongoose.connection.db;
+    const playersList = await db.collection('players').find({ teamId: String(teamId) }).toArray();
+    
+    const formatted = playersList.map(p => ({
+      id: String(p.id || p._id),
+      name: p.name,
+      specifications: p.specifications || [],
+      photo: p.photo || '',
+      status: p.status || 'SOLD'
+    }));
+    
+    res.json(formatted);
+  } catch (err) {
+    console.error('Error fetching players from players collection:', err);
+    res.status(500).json({ error: 'Failed to fetch team players' });
+  }
+});
+
+// 3. GET /api/fixtures - READ-ONLY from auctionstates collection with Alias Mapping
+app.get('/api/fixtures', async (req, res) => {
+  try {
+    const db = mongoose.connection.db;
+    const auctionStateDoc = await db.collection('auctionstates').findOne({});
+    if (!auctionStateDoc || !auctionStateDoc.tournamentMatches) {
+      return res.json([]);
+    }
+
+    const teams = auctionStateDoc.teams || [];
+    const teamMap = new Map();
+    teams.forEach(t => {
+      const norm = normalizeTeamName(t.name);
+      teamMap.set(norm, t);
+    });
+
+    let resolvedCount = 0;
+    let unresolvedCount = 0;
+
+    const enrichedFixtures = auctionStateDoc.tournamentMatches.map(m => {
+      const raw1 = m.team1Name || '';
+      const raw2 = m.team2Name || '';
+
+      const norm1 = TEAM_ALIASES[normalizeTeamName(raw1)] || normalizeTeamName(raw1);
+      const norm2 = TEAM_ALIASES[normalizeTeamName(raw2)] || normalizeTeamName(raw2);
+
+      const teamAObj = teamMap.get(norm1) || null;
+      const teamBObj = teamMap.get(norm2) || null;
+
+      if (teamAObj && teamBObj) {
+        resolvedCount++;
+      } else {
+        unresolvedCount++;
+      }
+
+      return {
+        id: String(m.id || `tm-${m.matchNo}`),
+        matchNo: m.matchNo,
+        day: m.day,
+        dateStr: m.dateStr,
+        dayStr: m.dayStr,
+        court: m.court,
+        startTime: m.startTime,
+        endTime: m.endTime,
+        team1Name: raw1,
+        team2Name: raw2,
+        groupLabel: `Group ${m.group || 'A'} • Match ${m.matchNo}`,
+        tournamentName: 'MAPL 2026',
+        teamAId: teamAObj ? String(teamAObj.id) : null,
+        teamBId: teamBObj ? String(teamBObj.id) : null,
+        teamA: teamAObj ? teamAObj.name : raw1,
+        teamB: teamBObj ? teamBObj.name : raw2
+      };
+    });
+
+    console.log(`[GET /api/fixtures] Team Resolution: ${resolvedCount} resolved, ${unresolvedCount} unresolved out of ${enrichedFixtures.length} matches.`);
+    res.json(enrichedFixtures);
+  } catch (err) {
+    console.error('Error fetching fixtures from auctionstates:', err);
+    res.status(500).json({ error: 'Failed to fetch fixtures' });
+  }
+});
+
+// 4. GET /api/matches - Fetch live/upcoming/completed matches from own 'matches' collection
+app.get('/api/matches', async (req, res) => {
+  try {
+    const { view } = req.query;
+    let filter = {};
+    if (view && view !== 'all') {
+      filter.status = view;
+    }
+
+    const matchesList = await Match.find(filter).sort({ createdAt: -1 }).lean();
+    
+    // Enrich with calculated scores
+    const enriched = await Promise.all(matchesList.map(async (m) => {
+      const state = await getOrRebuildMatchState(m.id);
+      return state ? state.fullMatchState : m;
+    }));
+
+    res.json(enriched);
+  } catch (err) {
+    console.error('Error fetching matches:', err);
+    res.status(500).json({ error: 'Failed to fetch matches' });
+  }
+});
+
+// 5. GET /api/matches/:id/state - Full Match State
+app.get('/api/matches/:id/state', async (req, res) => {
+  try {
+    const matchId = req.params.id;
+    const computed = await getOrRebuildMatchState(matchId);
+    if (!computed) {
+      return res.status(404).json({ error: 'Match not found' });
+    }
+    res.json(computed.fullMatchState);
+  } catch (err) {
+    console.error('Error fetching match state:', err);
+    res.status(500).json({ error: 'Failed to fetch match state' });
+  }
+});
+
+// 6. POST /api/matches/create - Create New Match (saves to own 'matches' & 'innings' collections)
+app.post('/api/matches/create', async (req, res) => {
+  try {
+    const {
+      matchId, tournamentName, groupLabel, ground, city, details, date, time,
+      totalOvers, playersPerSide, teamA, teamB, tossWinner, tossChoice, pin
+    } = req.body;
+
+    if (!matchId || !teamA || !teamB || !pin) {
+      return res.status(400).json({ error: 'Missing required match creation fields' });
+    }
+
+    const pinHash = hashPin(pin);
+    const initialToken = `token-${matchId}-${Date.now()}`;
+
+    const matchDoc = new Match({
+      id: matchId,
+      tournamentName: tournamentName || 'MAPL 2026',
+      groupLabel: groupLabel || 'Quarter Final 1',
+      ground: ground || 'Sun Valley Ground',
+      city: city || 'Gandhidham',
+      details: details || '',
+      date: date || 'Today',
+      time: time || 'Live',
+      totalOvers: Number(totalOvers) || 20,
+      playersPerSide: Number(playersPerSide) || 11,
+      teamA: {
+        id: teamA.id || null,
+        name: teamA.name,
+        shortName: teamA.shortName || teamA.name.slice(0, 3).toUpperCase(),
+        logo: teamA.logo || '',
+        logoColor: teamA.logoColor || '#dc2626',
+        logoText: teamA.logoText || teamA.name.charAt(0),
+        squad: teamA.squad || []
+      },
+      teamB: {
+        id: teamB.id || null,
+        name: teamB.name,
+        shortName: teamB.shortName || teamB.name.slice(0, 3).toUpperCase(),
+        logo: teamB.logo || '',
+        logoColor: teamB.logoColor || '#059669',
+        logoText: teamB.logoText || teamB.name.charAt(0),
+        squad: teamB.squad || []
+      },
+      tossWinner: tossWinner || teamA.name,
+      tossChoice: tossChoice || 'bat',
+      pinHash,
+      activeScorerToken: initialToken,
+      status: 'live'
+    });
+
+    await matchDoc.save();
+
+    const firstBatting = tossChoice === 'bat' ? tossWinner : (tossWinner === teamA.name ? teamB.name : teamA.name);
+    const firstBowling = firstBatting === teamA.name ? teamB.name : teamA.name;
+    const squadBat = firstBatting === teamA.name ? teamA.squad : teamB.squad;
+    const squadBowl = firstBowling === teamA.name ? teamA.squad : teamB.squad;
+
+    const inningsDoc = new Innings({
+      id: `${matchId}-inn1`,
+      matchId,
+      inningsNum: 1,
+      battingTeam: firstBatting,
+      bowlingTeam: firstBowling,
+      target: null,
+      openingBatter1: squadBat[0] || 'Batter 1',
+      openingBatter2: squadBat[1] || 'Batter 2',
+      openingBowler: squadBowl[0] || 'Bowler 1',
+      isCompleted: false
+    });
+
+    await inningsDoc.save();
+
+    matchCache.delete(matchId);
+    const computed = await getOrRebuildMatchState(matchId);
+
+    res.json({
+      success: true,
+      matchId,
+      token: initialToken,
+      state: computed.fullMatchState
+    });
+  } catch (err) {
+    console.error('Error creating match:', err);
+    res.status(500).json({ error: err.message || 'Failed to create match' });
+  }
+});
+
+// 7. POST /api/matches/:id/auth - Scorer PIN Auth
+app.post('/api/matches/:id/auth', async (req, res) => {
+  try {
+    const matchId = req.params.id;
+    const { pin } = req.body;
+
+    const matchRecord = await Match.findOne({ id: matchId }).lean();
+    if (!matchRecord) {
+      return res.status(404).json({ error: 'Match not found' });
+    }
+
+    const inputHash = hashPin(pin);
+    if (matchRecord.pinHash !== inputHash) {
+      return res.status(401).json({ error: 'Incorrect Scorer PIN' });
+    }
+
+    const newToken = `token-${matchId}-${Date.now()}`;
+    await Match.updateOne({ id: matchId }, { activeScorerToken: newToken });
+
+    matchCache.delete(matchId);
+    res.json({ success: true, token: newToken });
+  } catch (err) {
+    console.error('Error authenticating scorer:', err);
+    res.status(500).json({ error: 'Authentication failed' });
+  }
+});
+
+// 8. POST /api/matches/:id/ball - Record Ball
+app.post('/api/matches/:id/ball', async (req, res) => {
+  try {
+    const matchId = req.params.id;
+    const token = req.headers.authorization?.replace('Bearer ', '') || req.body.token;
+
+    const matchRecord = await Match.findOne({ id: matchId }).lean();
+    if (!matchRecord) return res.status(404).json({ error: 'Match not found' });
+
+    if (!verifyScorerToken(matchRecord, token)) {
+      return res.status(401).json({ error: 'Another scorer is active on this match', canTakeOver: true });
+    }
+
+    const {
+      striker, nonStriker, bowler, runsBat = 0, isWide = false, isNoBall = false,
+      isBye = false, isLegBye = false, extraRuns = 0, isWicket = false,
+      dismissalType, dismissedPlayer, fielder, nextBatter, nextBowler, commentaryText
+    } = req.body;
+
+    const prevBalls = await Ball.find({ matchId }).sort({ ballIndex: -1 }).lean();
+    const ballIndex = prevBalls.length + 1;
+
+    const activeInnings = await Innings.findOne({ matchId, isCompleted: false }).sort({ inningsNum: 1 }).lean() ||
+      await Innings.findOne({ matchId }).sort({ inningsNum: -1 }).lean();
+
+    const inningsNum = activeInnings ? activeInnings.inningsNum : 1;
+    const innBalls = prevBalls.filter(b => b.inningsNum === inningsNum);
+    const legalBalls = innBalls.filter(b => !b.isWide && !b.isNoBall).length;
+
+    const overNum = Math.floor(legalBalls / 6);
+    const ballNum = (legalBalls % 6) + (!isWide && !isNoBall ? 1 : 0);
+
+    const ballId = `ball-${matchId}-${inningsNum}-${ballIndex}-${Date.now()}`;
+
+    const ballDoc = new Ball({
+      id: ballId,
+      matchId,
+      inningsNum,
+      ballIndex,
+      overNum,
+      ballNum,
+      striker,
+      nonStriker,
+      bowler,
+      runsBat: Number(runsBat),
+      isWide: Boolean(isWide),
+      isNoBall: Boolean(isNoBall),
+      isBye: Boolean(isBye),
+      isLegBye: Boolean(isLegBye),
+      extraRuns: Number(extraRuns),
+      isWicket: Boolean(isWicket),
+      dismissalType: dismissalType || null,
+      dismissedPlayer: dismissedPlayer || null,
+      fielder: fielder || null,
+      nextBatter: nextBatter || null,
+      nextBowler: nextBowler || null
+    });
+
+    await ballDoc.save();
+
+    matchCache.delete(matchId);
+    const computed = await getOrRebuildMatchState(matchId);
+
+    setImmediate(() => broadcastMatchState(matchId));
+
+    res.json({
+      success: true,
+      saved: true,
+      state: computed.fullMatchState
+    });
+  } catch (err) {
+    console.error('Error recording ball:', err);
+    res.status(500).json({ error: 'Failed to record ball' });
+  }
+});
+
+// 9. POST /api/matches/:id/undo - Undo Last Ball
+app.post('/api/matches/:id/undo', async (req, res) => {
+  try {
+    const matchId = req.params.id;
+    const token = req.headers.authorization?.replace('Bearer ', '') || req.body.token;
+
+    const matchRecord = await Match.findOne({ id: matchId }).lean();
+    if (!verifyScorerToken(matchRecord, token)) {
+      return res.status(401).json({ error: 'Another scorer is active on this match', canTakeOver: true });
+    }
+
+    const lastBall = await Ball.findOne({ matchId }).sort({ ballIndex: -1 }).lean();
+    if (!lastBall) {
+      return res.status(400).json({ error: 'No balls to undo' });
+    }
+
+    await Ball.deleteOne({ id: lastBall.id });
+
+    const auditDoc = new BallAudit({
+      id: `audit-${Date.now()}`,
+      matchId,
+      action: 'UNDO_BALL',
+      detailsJson: JSON.stringify(lastBall)
+    });
+    await auditDoc.save();
+
+    matchCache.delete(matchId);
+    const computed = await getOrRebuildMatchState(matchId);
+
+    setImmediate(() => broadcastMatchState(matchId));
+
+    res.json({
+      success: true,
+      saved: true,
+      undoneBall: lastBall,
+      state: computed.fullMatchState
+    });
+  } catch (err) {
+    console.error('Error undoing ball:', err);
+    res.status(500).json({ error: 'Failed to undo ball' });
+  }
+});
+
+// 10. POST /api/matches/:id/start-second-innings
+app.post('/api/matches/:id/start-second-innings', async (req, res) => {
+  try {
+    const matchId = req.params.id;
+    const { openingBatter1, openingBatter2, openingBowler } = req.body;
+
+    const matchRecord = await Match.findOne({ id: matchId }).lean();
+    if (!matchRecord) return res.status(404).json({ error: 'Match not found' });
+
+    const computedPrev = await getOrRebuildMatchState(matchId);
+    const inn1Score = computedPrev.fullMatchState.scorecard[0];
+    const target = inn1Score ? inn1Score.totalRuns + 1 : 150;
+
+    const teamA = matchRecord.teamA;
+    const teamB = matchRecord.teamB;
+    const tossWinner = matchRecord.tossWinner;
+    const tossChoice = matchRecord.tossChoice;
+
+    const firstBatting = tossChoice === 'bat' ? tossWinner : (tossWinner === teamA.name ? teamB.name : teamA.name);
+    const secondBatting = firstBatting === teamA.name ? teamB.name : teamA.name;
+    const secondBowling = firstBatting;
+
+    const squadBat = secondBatting === teamA.name ? teamA.squad : teamB.squad;
+    const squadBowl = secondBowling === teamA.name ? teamA.squad : teamB.squad;
+
+    await Innings.findOneAndUpdate(
+      { matchId, inningsNum: 2 },
+      {
+        id: `${matchId}-inn2`,
+        matchId,
+        inningsNum: 2,
+        battingTeam: secondBatting,
+        bowlingTeam: secondBowling,
+        target,
+        openingBatter1: openingBatter1 || squadBat[0],
+        openingBatter2: openingBatter2 || squadBat[1],
+        openingBowler: openingBowler || squadBowl[0],
+        isCompleted: false
+      },
+      { upsert: true, new: true }
+    );
+
+    matchCache.delete(matchId);
+    const computed = await getOrRebuildMatchState(matchId);
+    setImmediate(() => broadcastMatchState(matchId));
+
+    res.json({ success: true, state: computed.fullMatchState });
+  } catch (err) {
+    console.error('Error starting 2nd innings:', err);
+    res.status(500).json({ error: 'Failed to start 2nd innings' });
+  }
+});
+
+// Seed default fixture matches if DB has zero matches
+async function seedDefaultData() {
+  try {
+    const count = await Match.countDocuments();
+    if (count > 0) return;
+
+    console.log('Seeding default match records into MongoDB Atlas matches collection...');
+
+    const squadA = ['Rajesh Patel', 'Devendra Jadeja', 'Amit Sharma', 'Pritesh Shah', 'Hardik Vora', 'Bhavin Solanki', 'Ketan Joshi', 'Sanjay Mehta', 'Sunil Gadhvi', 'Nilesh Ahir', 'Jayesh Patel'];
+    const squadB = ['Vikram Rathod', 'Harish Parmar', 'Girish Kothari', 'Ramesh Solanki', 'Chetan Thakar', 'Mahesh Dave', 'Haresh Bhanushali', 'Mayur Shah', 'Pratik Chawda', 'Dharmendra K', 'Manish Maheshwari'];
+
+    const matchId = 'match-101';
+    const pinHash = hashPin('1234');
+    const token = 'token-101-active';
+
+    const match101 = new Match({
+      id: matchId,
+      tournamentName: 'MAPL 2026',
+      groupLabel: 'Quarter Final 1',
+      ground: 'Sun Valley Ground',
+      city: 'Gandhidham',
+      details: 'Type B, Rs. 5000 Entry',
+      date: '26-Sep-2026',
+      time: '02:30 PM IST',
+      totalOvers: 20,
+      playersPerSide: 11,
+      teamA: { id: '183873', name: 'SIPL WARRIORS', shortName: 'SWW', logoColor: '#dc2626', logoText: 'S', squad: squadA },
+      teamB: { id: '183884', name: 'KANDLA TIGERS', shortName: 'KGT', logoColor: '#059669', logoText: 'K', squad: squadB },
+      tossWinner: 'KANDLA TIGERS',
+      tossChoice: 'bowl',
+      pinHash,
+      activeScorerToken: token,
+      status: 'live'
+    });
+    await match101.save();
+
+    await new Innings({ id: `${matchId}-inn1`, matchId, inningsNum: 1, battingTeam: 'SIPL WARRIORS', bowlingTeam: 'KANDLA TIGERS', target: null, openingBatter1: squadA[0], openingBatter2: squadA[1], openingBowler: squadB[0], isCompleted: true }).save();
+    await new Innings({ id: `${matchId}-inn2`, matchId, inningsNum: 2, battingTeam: 'KANDLA TIGERS', bowlingTeam: 'SIPL WARRIORS', target: 187, openingBatter1: squadB[0], openingBatter2: squadB[1], openingBowler: squadA[0], isCompleted: false }).save();
+
+    const initialBalls = [
+      { striker: squadB[0], nonStriker: squadB[1], bowler: squadA[0], runsBat: 1 },
+      { striker: squadB[1], nonStriker: squadB[0], bowler: squadA[0], runsBat: 4 },
+      { striker: squadB[1], nonStriker: squadB[0], bowler: squadA[0], runsBat: 6 },
+      { striker: squadB[1], nonStriker: squadB[0], bowler: squadA[0], runsBat: 0, isWicket: true, dismissalType: 'caught', fielder: squadA[2], nextBatter: squadB[2] },
+      { striker: squadB[2], nonStriker: squadB[0], bowler: squadA[0], runsBat: 2 }
+    ];
+
+    for (let idx = 0; idx < initialBalls.length; idx++) {
+      const b = initialBalls[idx];
+      await new Ball({
+        id: `ball-101-${idx+1}`, matchId, inningsNum: 2, ballIndex: idx + 1, overNum: 0, ballNum: idx + 1,
+        striker: b.striker, nonStriker: b.nonStriker, bowler: b.bowler, runsBat: b.runsBat || 0, isWide: false, isNoBall: false,
+        extraRuns: 0, isWicket: Boolean(b.isWicket), dismissalType: b.dismissalType || null, dismissedPlayer: b.isWicket ? b.striker : null, fielder: b.fielder || null, nextBatter: b.nextBatter || null
+      }).save();
+    }
+
+    console.log('Seeding default match records into MongoDB Atlas completed.');
+  } catch (err) {
+    console.error('Error seeding default data:', err);
+  }
+}
+
+// Socket.io Connection Logic
 io.on('connection', (socket) => {
   socket.on('join_room', (matchId) => {
-    socket.join(`match:${matchId}`);
-    const stateObj = getOrRebuildMatchState(matchId);
-    if (stateObj) {
-      socket.emit('state', stateObj.fullMatchState);
-    }
+    socket.join(matchId);
   });
 
   socket.on('leave_room', (matchId) => {
-    socket.leave(`match:${matchId}`);
+    socket.leave(matchId);
   });
 });
-
-// REST ENDPOINTS
-
-// 1. GET /api/matches - List all matches for Home Page
-app.get('/api/matches', (req, res) => {
-  const view = req.query.view || 'live';
-  const matches = db.prepare('SELECT id FROM matches ORDER BY created_at DESC').all();
-  
-  const summaries = matches.map(m => {
-    const computed = getOrRebuildMatchState(m.id);
-    return computed ? computed.matchSummary : null;
-  }).filter(Boolean);
-
-  const filtered = summaries.filter(s => {
-    if (view === 'live') return s.status === 'live';
-    if (view === 'upcoming') return s.status === 'upcoming';
-    if (view === 'completed') return s.status === 'completed';
-    return true;
-  });
-
-  res.json(filtered.length > 0 ? filtered : summaries);
-});
-
-// 2. GET /api/matches/:id/state - Viewer & Initial load endpoint
-app.get('/api/matches/:id/state', (req, res) => {
-  const computed = getOrRebuildMatchState(req.params.id);
-  if (!computed) {
-    return res.status(404).json({ error: 'Match not found' });
-  }
-  res.json(computed.fullMatchState);
-});
-
-// 3. GET /api/fixtures & POST /api/matches/create - Create Match from Setup Screen
-app.get('/api/fixtures', (req, res) => {
-  res.json([
-    {
-      id: 'match-101',
-      tournamentName: 'MAPL 2026',
-      groupLabel: 'Quarter Final 1',
-      teamA: 'SIPL WARRIORS',
-      teamB: 'KANDLA TIGERS',
-      squadA: ['Rajesh Patel', 'Devendra Jadeja', 'Amit Sharma', 'Pritesh Shah', 'Hardik Vora', 'Bhavin Solanki', 'Ketan Joshi', 'Sanjay Mehta', 'Sunil Gadhvi', 'Nilesh Ahir', 'Jayesh Patel'],
-      squadB: ['Vikram Rathod', 'Harish Parmar', 'Girish Kothari', 'Ramesh Solanki', 'Chetan Thakar', 'Mahesh Dave', 'Haresh Bhanushali', 'Mayur Shah', 'Pratik Chawda', 'Dharmendra K', 'Manish Maheshwari']
-    },
-    {
-      id: 'match-102',
-      tournamentName: 'MAPL 2026',
-      groupLabel: 'Group Stage - Group A',
-      teamA: 'BHUJ ROYALS',
-      teamB: 'GANDHIDHAM KINGS',
-      squadA: ['Player A1', 'Player A2', 'Player A3', 'Player A4', 'Player A5', 'Player A6', 'Player A7', 'Player A8', 'Player A9', 'Player A10', 'Player A11'],
-      squadB: ['Player B1', 'Player B2', 'Player B3', 'Player B4', 'Player B5', 'Player B6', 'Player B7', 'Player B8', 'Player B9', 'Player B10', 'Player B11']
-    }
-  ]);
-});
-
-app.post('/api/matches/create', (req, res) => {
-  const {
-    matchId: customId,
-    tournamentName,
-    groupLabel,
-    ground,
-    city,
-    details,
-    date,
-    time,
-    totalOvers,
-    playersPerSide,
-    teamA,
-    teamB,
-    tossWinner,
-    tossChoice,
-    pin
-  } = req.body;
-
-  if (!pin || String(pin).length < 4 || String(pin).length > 6) {
-    return res.status(400).json({ error: 'PIN must be between 4 and 6 digits' });
-  }
-
-  const matchId = customId || `match-${Date.now().toString(36)}`;
-  const pinHash = hashPin(pin);
-  const activeScorerToken = crypto.randomUUID();
-  const createdAt = Date.now();
-
-  const teamAData = {
-    name: teamA.name,
-    shortName: teamA.shortName || teamA.name.slice(0, 3).toUpperCase(),
-    logoColor: teamA.logoColor || '#dc2626',
-    logoText: teamA.logoText || teamA.name.charAt(0),
-    squad: teamA.squad || []
-  };
-
-  const teamBData = {
-    name: teamB.name,
-    shortName: teamB.shortName || teamB.name.slice(0, 3).toUpperCase(),
-    logoColor: teamB.logoColor || '#059669',
-    logoText: teamB.logoText || teamB.name.charAt(0),
-    squad: teamB.squad || []
-  };
-
-  // Save match record to SQLite
-  db.prepare(`
-    INSERT OR REPLACE INTO matches (
-      id, tournament_name, group_label, ground, city, details, date, time,
-      total_overs, players_per_side, team_a_json, team_b_json, toss_winner, toss_choice,
-      pin_hash, active_scorer_token, status, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    matchId,
-    tournamentName || 'MAPL 2026',
-    groupLabel || 'Quarter Final',
-    ground || 'Sun Valley Ground',
-    city || 'Gandhidham',
-    details || 'T20 Match',
-    date || '26-Sep-2026',
-    time || '02:30 PM IST',
-    Number(totalOvers) || 20,
-    Number(playersPerSide) || 11,
-    JSON.stringify(teamAData),
-    JSON.stringify(teamBData),
-    tossWinner || teamA.name,
-    tossChoice || 'bat',
-    pinHash,
-    activeScorerToken,
-    'live',
-    createdAt
-  );
-
-  // Initialize Innings 1 record
-  const firstBatting = tossChoice === 'bat' ? tossWinner : (tossWinner === teamA.name ? teamB.name : teamA.name);
-  const firstBowling = firstBatting === teamA.name ? teamB.name : teamA.name;
-  const squadBat = firstBatting === teamA.name ? teamAData.squad : teamBData.squad;
-  const squadBowl = firstBowling === teamA.name ? teamAData.squad : teamBData.squad;
-
-  db.prepare(`
-    INSERT OR REPLACE INTO innings (
-      id, match_id, innings_num, batting_team, bowling_team, target,
-      opening_batter1, opening_batter2, opening_bowler, is_completed, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    `${matchId}-inn1`,
-    matchId,
-    1,
-    firstBatting,
-    firstBowling,
-    null,
-    squadBat[0] || 'Batter 1',
-    squadBat[1] || 'Batter 2',
-    squadBowl[0] || 'Bowler 1',
-    0,
-    createdAt
-  );
-
-  matchCache.delete(matchId);
-  const computed = getOrRebuildMatchState(matchId);
-  broadcastMatchState(matchId);
-
-  res.json({
-    success: true,
-    matchId,
-    token: activeScorerToken,
-    state: computed.fullMatchState
-  });
-});
-
-// 4. POST /api/matches/:id/auth - Authenticate Umpire PIN & Session Token
-app.post('/api/matches/:id/auth', (req, res) => {
-  const { pin } = req.body;
-  const matchId = req.params.id;
-
-  const matchRecord = db.prepare('SELECT * FROM matches WHERE id = ?').get(matchId);
-  if (!matchRecord) return res.status(404).json({ error: 'Match not found' });
-
-  const inputHash = hashPin(pin);
-  if (inputHash !== matchRecord.pin_hash) {
-    return res.status(401).json({ error: 'Incorrect PIN' });
-  }
-
-  // Issue new active scorer token
-  const newToken = crypto.randomUUID();
-  db.prepare('UPDATE matches SET active_scorer_token = ? WHERE id = ?').run(newToken, matchId);
-  matchCache.delete(matchId);
-
-  const computed = getOrRebuildMatchState(matchId);
-  res.json({
-    success: true,
-    token: newToken,
-    state: computed.fullMatchState
-  });
-});
-
-// Auth Middleware helper
-function verifyScorerToken(matchId, token) {
-  const matchRecord = db.prepare('SELECT active_scorer_token FROM matches WHERE id = ?').get(matchId);
-  if (!matchRecord) return false;
-  return matchRecord.active_scorer_token === token;
-}
-
-// 5. POST /api/matches/:id/ball - Record a Ball
-app.post('/api/matches/:id/ball', (req, res) => {
-  const matchId = req.params.id;
-  const token = req.headers.authorization?.replace('Bearer ', '') || req.body.token;
-
-  if (!verifyScorerToken(matchId, token)) {
-    return res.status(401).json({ error: 'Another scorer is active on this match', canTakeOver: true });
-  }
-
-  const {
-    inningsNum = 1,
-    striker,
-    nonStriker,
-    bowler,
-    runsBat = 0,
-    isWide = false,
-    isNoBall = false,
-    isBye = false,
-    isLegBye = false,
-    extraRuns = 0,
-    isWicket = false,
-    dismissalType,
-    dismissedPlayer,
-    fielder,
-    nextBatter,
-    nextBowler
-  } = req.body;
-
-  const ballsList = db.prepare('SELECT * FROM balls WHERE match_id = ? AND innings_num = ? ORDER BY ball_index ASC').all(matchId, inningsNum);
-  const ballIndex = ballsList.length + 1;
-
-  // Count legal balls to compute over_num and ball_num
-  const legalBalls = ballsList.filter(b => !b.is_wide && !b.is_no_ball).length;
-  const overNum = Math.floor(legalBalls / 6);
-  const ballNum = (legalBalls % 6) + (!isWide && !isNoBall ? 1 : 0);
-
-  const ballId = `ball-${matchId}-${inningsNum}-${ballIndex}-${Date.now()}`;
-  const timestamp = Date.now();
-
-  db.prepare(`
-    INSERT INTO balls (
-      id, match_id, innings_num, ball_index, over_num, ball_num,
-      striker, non_striker, bowler, runs_bat, is_wide, is_no_ball, is_bye, is_leg_bye,
-      extra_runs, is_wicket, dismissal_type, dismissed_player, fielder,
-      next_batter, next_bowler, timestamp
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    ballId, matchId, inningsNum, ballIndex, overNum, ballNum,
-    striker, nonStriker, bowler, Number(runsBat), isWide ? 1 : 0, isNoBall ? 1 : 0, isBye ? 1 : 0, isLegBye ? 1 : 0,
-    Number(extraRuns), isWicket ? 1 : 0, dismissalType || null, dismissedPlayer || null, fielder || null,
-    nextBatter || null, nextBowler || null, timestamp
-  );
-
-  // Clear cache and rebuild
-  matchCache.delete(matchId);
-  const computed = getOrRebuildMatchState(matchId);
-
-  // Non-blocking real-time socket broadcast
-  setImmediate(() => broadcastMatchState(matchId));
-
-  res.json({
-    success: true,
-    saved: true,
-    state: computed.fullMatchState
-  });
-});
-
-// 6. POST /api/matches/:id/undo - Undo Last Ball
-app.post('/api/matches/:id/undo', (req, res) => {
-  const matchId = req.params.id;
-  const token = req.headers.authorization?.replace('Bearer ', '') || req.body.token;
-
-  if (!verifyScorerToken(matchId, token)) {
-    return res.status(401).json({ error: 'Another scorer is active on this match', canTakeOver: true });
-  }
-
-  const lastBall = db.prepare('SELECT * FROM balls WHERE match_id = ? ORDER BY ball_index DESC LIMIT 1').get(matchId);
-  if (!lastBall) {
-    return res.status(400).json({ error: 'No balls to undo' });
-  }
-
-  // Delete last ball
-  db.prepare('DELETE FROM balls WHERE id = ?').run(lastBall.id);
-
-  // Insert audit log
-  db.prepare('INSERT INTO audit_logs (id, match_id, action, details_json, timestamp) VALUES (?, ?, ?, ?, ?)').run(
-    `audit-${Date.now()}`, matchId, 'UNDO_BALL', JSON.stringify(lastBall), Date.now()
-  );
-
-  matchCache.delete(matchId);
-  const computed = getOrRebuildMatchState(matchId);
-
-  setImmediate(() => broadcastMatchState(matchId));
-
-  res.json({
-    success: true,
-    saved: true,
-    undoneBall: lastBall,
-    state: computed.fullMatchState
-  });
-});
-
-// 7. POST /api/matches/:id/start-second-innings
-app.post('/api/matches/:id/start-second-innings', (req, res) => {
-  const matchId = req.params.id;
-  const { openingBatter1, openingBatter2, openingBowler } = req.body;
-
-  const matchRecord = db.prepare('SELECT * FROM matches WHERE id = ?').get(matchId);
-  if (!matchRecord) return res.status(404).json({ error: 'Match not found' });
-
-  const computedPrev = getOrRebuildMatchState(matchId);
-  const inn1Score = computedPrev.fullMatchState.scorecard[0];
-  const target = inn1Score.totalRuns + 1;
-
-  const teamA = JSON.parse(matchRecord.team_a_json);
-  const teamB = JSON.parse(matchRecord.team_b_json);
-  const tossWinner = matchRecord.toss_winner;
-  const tossChoice = matchRecord.toss_choice;
-
-  const firstBatting = tossChoice === 'bat' ? tossWinner : (tossWinner === teamA.name ? teamB.name : teamA.name);
-  const secondBatting = firstBatting === teamA.name ? teamB.name : teamA.name;
-  const secondBowling = firstBatting;
-
-  const squadBat = secondBatting === teamA.name ? teamA.squad : teamB.squad;
-  const squadBowl = secondBowling === teamA.name ? teamA.squad : teamB.squad;
-
-  db.prepare(`
-    INSERT OR REPLACE INTO innings (
-      id, match_id, innings_num, batting_team, bowling_team, target,
-      opening_batter1, opening_batter2, opening_bowler, is_completed, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    `${matchId}-inn2`, matchId, 2, secondBatting, secondBowling, target,
-    openingBatter1 || squadBat[0], openingBatter2 || squadBat[1], openingBowler || squadBowl[0], 0, Date.now()
-  );
-
-  matchCache.delete(matchId);
-  const computed = getOrRebuildMatchState(matchId);
-  setImmediate(() => broadcastMatchState(matchId));
-
-  res.json({ success: true, state: computed.fullMatchState });
-});
-
-// GET /api/fixtures - Fetch pre-configured tournament fixtures
-app.get('/api/fixtures', (req, res) => {
-  res.setHeader('Content-Type', 'application/json');
-  try {
-    const fixtures = [
-      {
-        id: 'fix-101',
-        tournamentName: 'MAPL 2026',
-        groupLabel: 'Quarter Final 1',
-        teamA: 'SIPL WARRIORS',
-        teamB: 'KANDLA TIGERS',
-        squadA: ['Rajesh Patel', 'Devendra Jadeja', 'Amit Sharma', 'Pritesh Shah', 'Hardik Vora', 'Bhavin Solanki', 'Ketan Joshi', 'Sanjay Mehta', 'Sunil Gadhvi', 'Nilesh Ahir', 'Jayesh Patel'],
-        squadB: ['Vikram Rathod', 'Harish Parmar', 'Girish Kothari', 'Ramesh Solanki', 'Chetan Thakar', 'Mahesh Dave', 'Haresh Bhanushali', 'Mayur Shah', 'Pratik Chawda', 'Dharmendra K', 'Manish Maheshwari']
-      },
-      {
-        id: 'fix-102',
-        tournamentName: 'MAPL 2026',
-        groupLabel: 'Quarter Final 2',
-        teamA: 'GANDHIDHAM SUPER KINGS',
-        teamB: 'KUTCH ROYAL STRIKERS',
-        squadA: ['Aarav Patel', 'Vivan Shah', 'Aditya Joshi'],
-        squadB: ['Rohan Mehta', 'Yash Varma', 'Karan Solanki']
-      }
-    ];
-    res.json(fixtures);
-  } catch (err) {
-    res.json([]);
-  }
-});
-
-// Seed default fixtures if database is empty
-function seedDefaultData() {
-  const matchCount = db.prepare('SELECT COUNT(*) as count FROM matches').get().count;
-  if (matchCount > 0) return;
-
-  console.log('Seeding default match fixtures into SQLite database...');
-
-  const squadA = ['Rajesh Patel', 'Devendra Jadeja', 'Amit Sharma', 'Pritesh Shah', 'Hardik Vora', 'Bhavin Solanki', 'Ketan Joshi', 'Sanjay Mehta', 'Sunil Gadhvi', 'Nilesh Ahir', 'Jayesh Patel'];
-  const squadB = ['Vikram Rathod', 'Harish Parmar', 'Girish Kothari', 'Ramesh Solanki', 'Chetan Thakar', 'Mahesh Dave', 'Haresh Bhanushali', 'Mayur Shah', 'Pratik Chawda', 'Dharmendra K', 'Manish Maheshwari'];
-
-  const matchId = 'match-101';
-  const pinHash = hashPin('1234');
-  const token = 'token-101-active';
-
-  db.prepare(`
-    INSERT INTO matches (
-      id, tournament_name, group_label, ground, city, details, date, time,
-      total_overs, players_per_side, team_a_json, team_b_json, toss_winner, toss_choice,
-      pin_hash, active_scorer_token, status, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    matchId, 'MAPL 2026', 'Quarter Final 1', 'Sun Valley Ground', 'Gandhidham', 'Type B, Rs. 5000 Entry', '26-Sep-2026', '02:30 PM IST',
-    20, 11,
-    JSON.stringify({ name: 'SIPL WARRIORS', shortName: 'SWW', logoColor: '#dc2626', logoText: 'S', squad: squadA }),
-    JSON.stringify({ name: 'KANDLA TIGERS', shortName: 'KGT', logoColor: '#059669', logoText: 'K', squad: squadB }),
-    'KANDLA TIGERS', 'bowl', pinHash, token, 'live', Date.now()
-  );
-
-  db.prepare(`
-    INSERT INTO innings (
-      id, match_id, innings_num, batting_team, bowling_team, target, opening_batter1, opening_batter2, opening_bowler, is_completed, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(`${matchId}-inn1`, matchId, 1, 'SIPL WARRIORS', 'KANDLA TIGERS', null, squadA[0], squadA[1], squadB[0], 1, Date.now());
-
-  db.prepare(`
-    INSERT INTO innings (
-      id, match_id, innings_num, batting_team, bowling_team, target, opening_batter1, opening_batter2, opening_bowler, is_completed, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(`${matchId}-inn2`, matchId, 2, 'KANDLA TIGERS', 'SIPL WARRIORS', 187, squadB[0], squadB[1], squadA[0], 0, Date.now());
-
-  // Seed sample balls for match-101
-  const initialBalls = [
-    { striker: squadB[0], nonStriker: squadB[1], bowler: squadA[0], runsBat: 1 },
-    { striker: squadB[1], nonStriker: squadB[0], bowler: squadA[0], runsBat: 4 },
-    { striker: squadB[1], nonStriker: squadB[0], bowler: squadA[0], runsBat: 6 },
-    { striker: squadB[1], nonStriker: squadB[0], bowler: squadA[0], runsBat: 0, isWicket: 1, dismissalType: 'caught', fielder: squadA[2], nextBatter: squadB[2] },
-    { striker: squadB[2], nonStriker: squadB[0], bowler: squadA[0], runsBat: 2 }
-  ];
-
-  initialBalls.forEach((b, idx) => {
-    db.prepare(`
-      INSERT INTO balls (
-        id, match_id, innings_num, ball_index, over_num, ball_num,
-        striker, non_striker, bowler, runs_bat, is_wide, is_no_ball, is_bye, is_leg_bye,
-        extra_runs, is_wicket, dismissal_type, dismissed_player, fielder, next_batter, timestamp
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      `ball-101-${idx+1}`, matchId, 2, idx + 1, 0, idx + 1,
-      b.striker, b.nonStriker, b.bowler, b.runsBat || 0, b.isWide ? 1 : 0, b.isNoBall ? 1 : 0, 0, 0,
-      0, b.isWicket ? 1 : 0, b.dismissalType || null, b.isWicket ? b.striker : null, b.fielder || null, b.nextBatter || null, Date.now() + idx
-    );
-  });
-
-  // Seed match-102
-  const matchId2 = 'match-102';
-  db.prepare(`
-    INSERT INTO matches (
-      id, tournament_name, group_label, ground, city, details, date, time,
-      total_overs, players_per_side, team_a_json, team_b_json, toss_winner, toss_choice,
-      pin_hash, active_scorer_token, status, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    matchId2, 'MAPL 2026', 'Group Stage - Group A', 'Kutch Cricket Association Ground', 'Gandhidham', 'Type A Turf Ground', '26-Sep-2026', '04:00 PM IST',
-    20, 11,
-    JSON.stringify({ name: 'BHUJ ROYALS', shortName: 'BJR', logoColor: '#2563eb', logoText: 'B', squad: squadA }),
-    JSON.stringify({ name: 'GANDHIDHAM KINGS', shortName: 'GDK', logoColor: '#d97706', logoText: 'G', squad: squadB }),
-    'BHUJ ROYALS', 'bat', pinHash, 'token-102-active', 'live', Date.now()
-  );
-
-  db.prepare(`
-    INSERT INTO innings (
-      id, match_id, innings_num, batting_team, bowling_team, target, opening_batter1, opening_batter2, opening_bowler, is_completed, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(`${matchId2}-inn1`, matchId2, 1, 'BHUJ ROYALS', 'GANDHIDHAM KINGS', null, squadA[0], squadA[1], squadB[0], 0, Date.now());
-
-  // Seed completed match-301
-  const matchId3 = 'match-301';
-  db.prepare(`
-    INSERT OR REPLACE INTO matches (
-      id, tournament_name, group_label, ground, city, details, date, time,
-      total_overs, players_per_side, team_a_json, team_b_json, toss_winner, toss_choice,
-      pin_hash, active_scorer_token, status, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    matchId3, 'MAPL 2026', 'Group B - Match 12', 'Kutch Cricket Association Ground', 'Gandhidham', 'Day Match', '25-Sep-2026', '10:00 AM IST',
-    20, 11,
-    JSON.stringify({ name: 'KUTCH SUPER KINGS', shortName: 'KSK', logoColor: '#ca8a04', logoText: 'K', squad: squadA }),
-    JSON.stringify({ name: 'MUNDRA LIONS', shortName: 'MNL', logoColor: '#0284c7', logoText: 'M', squad: squadB }),
-    'KUTCH SUPER KINGS', 'bat', pinHash, 'token-301-active', 'completed', Date.now()
-  );
-
-  db.prepare(`
-    INSERT OR REPLACE INTO innings (
-      id, match_id, innings_num, batting_team, bowling_team, target, opening_batter1, opening_batter2, opening_bowler, is_completed, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(`${matchId3}-inn1`, matchId3, 1, 'KUTCH SUPER KINGS', 'MUNDRA LIONS', null, squadA[0], squadA[1], squadB[0], 1, Date.now());
-
-  db.prepare(`
-    INSERT OR REPLACE INTO innings (
-      id, match_id, innings_num, batting_team, bowling_team, target, opening_batter1, opening_batter2, opening_bowler, is_completed, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(`${matchId3}-inn2`, matchId3, 2, 'MUNDRA LIONS', 'KUTCH SUPER KINGS', 187, squadB[0], squadB[1], squadA[0], 1, Date.now());
-
-  console.log('Seeding default matches completed.');
-}
-
-seedDefaultData();
 
 httpServer.listen(PORT, () => {
-  console.log(`Backend Engine server listening on http://localhost:${PORT}`);
+  console.log(`Backend Engine server listening on port ${PORT}`);
 });

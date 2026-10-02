@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Navbar } from '../components/Navbar';
 import { Trophy, Users, Lock, Play, Plus, Trash2, ArrowLeft, Eye, EyeOff, ShieldCheck } from 'lucide-react';
-import { fetchFixtures, createMatch } from '../services/apiService';
+import { fetchFixtures, createMatch, fetchTeams, fetchTeamPlayers } from '../services/apiService';
 
 export function AdminSetupPage({ onNavigateToScoring, onBackToHome }) {
   const [fixtures, setFixtures] = useState([]);
@@ -46,7 +46,11 @@ export function AdminSetupPage({ onNavigateToScoring, onBackToHome }) {
   const [errors, setErrors] = useState({});
   const [fixtureError, setFixtureError] = useState(null);
 
+  const [teams, setTeams] = useState([]);
+
   useEffect(() => {
+    fetchTeams().then(data => { if (Array.isArray(data)) setTeams(data); }).catch(() => {});
+
     fetchFixtures()
       .then(data => {
         if (Array.isArray(data)) {
@@ -69,7 +73,7 @@ export function AdminSetupPage({ onNavigateToScoring, onBackToHome }) {
     }
   }, [teamAName, teamBName, tossWinner]);
 
-  const handleFixtureChange = (e) => {
+  const handleFixtureChange = async (e) => {
     const fixtureId = e.target.value;
     setSelectedFixtureId(fixtureId);
 
@@ -81,9 +85,16 @@ export function AdminSetupPage({ onNavigateToScoring, onBackToHome }) {
       setGroupLabel(fix.groupLabel || 'Match');
       setTeamAName(fix.teamA);
       setTeamBName(fix.teamB);
-      if (fix.squadA) setSquadA(fix.squadA);
-      if (fix.squadB) setSquadB(fix.squadB);
       setTossWinner(fix.teamA);
+
+      if (fix.teamAId) {
+        const pA = await fetchTeamPlayers(fix.teamAId);
+        if (pA && pA.length > 0) setSquadA(pA.map(p => p.name));
+      }
+      if (fix.teamBId) {
+        const pB = await fetchTeamPlayers(fix.teamBId);
+        if (pB && pB.length > 0) setSquadB(pB.map(p => p.name));
+      }
     }
   };
 
