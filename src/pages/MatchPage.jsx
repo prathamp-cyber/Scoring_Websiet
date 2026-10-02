@@ -9,10 +9,11 @@ import { SquadsTab } from '../components/tabs/SquadsTab';
 import { AnalysisTab } from '../components/tabs/AnalysisTab';
 import { InfoTab } from '../components/tabs/InfoTab';
 import { MatchSidePanel } from '../components/MatchSidePanel';
-import { getMatchDetail, simulateLiveBallUpdate } from '../services/matchDetailService';
+import { getMatchDetail } from '../services/matchDetailService';
+import { fetchMatchState } from '../services/apiService';
+import { getSocket } from '../services/socketService';
 
 export const MatchPage = ({ matchId, initialTab = 'live', onBackToHome }) => {
-  // Read tab parameter from URL query string if present
   const getTabFromUrl = () => {
     const params = new URLSearchParams(window.location.search);
     const tabParam = params.get('tab');
@@ -26,14 +27,61 @@ export const MatchPage = ({ matchId, initialTab = 'live', onBackToHome }) => {
   const [matchData, setMatchData] = useState(() => getMatchDetail(matchId));
   const [activeToast, setActiveToast] = useState(null);
 
-  // Sync state when matchId changes
-  const prevMatchId = React.useRef(matchId);
-  if (prevMatchId.current !== matchId) {
-    prevMatchId.current = matchId;
-    setMatchData(getMatchDetail(matchId));
-  }
+  // Initial load from Backend API
+  useEffect(() => {
+    fetchMatchState(matchId)
+      .then(state => {
+        if (state) {
+          const fallback = getMatchDetail(matchId);
+          setMatchData({
+            ...fallback,
+            ...state,
+            sidePanel: state.sidePanel || fallback?.sidePanel || {
+              currentRR: "9.43",
+              requiredRR: "9.00",
+              target: "187",
+              projectedScore: "188",
+              seriesName: state.tournamentName || "MAPL 2026",
+              seriesLink: "#",
+              matchDate: state.date || "26-Sep-2026",
+              location: state.ground || "Sun Valley Ground, Gandhidham",
+              locationLink: "#",
+              lastUpdatedScorer: "Official Scorer",
+              lastUpdatedTime: "Just now"
+            }
+          });
+        }
+      })
+      .catch(() => {
+        // Fallback to static mock if API loading
+      });
+  }, [matchId]);
 
-  // Handle Tab changes with URL query parameter sync
+  // Real-time live update sync via Socket.io
+  useEffect(() => {
+    const socket = getSocket();
+    socket.emit('join_room', matchId);
+
+    const handleStateUpdate = (newState) => {
+      setMatchData(prev => {
+        const fallback = getMatchDetail(matchId);
+        return {
+          ...fallback,
+          ...newState,
+          sidePanel: newState.sidePanel || prev?.sidePanel || fallback?.sidePanel
+        };
+      });
+      setActiveToast('⚡ Score updated live from umpire panel!');
+    };
+
+    socket.on('state', handleStateUpdate);
+
+    return () => {
+      socket.off('state', handleStateUpdate);
+      socket.emit('leave_room', matchId);
+    };
+  }, [matchId]);
+
   const handleTabChange = (tabId) => {
     setActiveTab(tabId);
     const url = new URL(window.location.href);
@@ -41,7 +89,6 @@ export const MatchPage = ({ matchId, initialTab = 'live', onBackToHome }) => {
     window.history.pushState({}, '', url.toString());
   };
 
-  // Listen to popstate (browser back/forward button)
   useEffect(() => {
     const handlePopState = () => {
       const params = new URLSearchParams(window.location.search);
@@ -53,13 +100,6 @@ export const MatchPage = ({ matchId, initialTab = 'live', onBackToHome }) => {
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
-
-  // Live simulation update handler
-  const handleSimulateBall = () => {
-    const updated = simulateLiveBallUpdate(matchData);
-    setMatchData(updated);
-    setActiveToast('Live ball update simulated! (+4 runs added to score)');
-  };
 
   const renderTabContent = () => {
     switch (activeTab) {
@@ -82,10 +122,8 @@ export const MatchPage = ({ matchId, initialTab = 'live', onBackToHome }) => {
 
   return (
     <div className="app-container match-page-container">
-      {/* 1. Sticky Navigation Bar */}
       <Navbar />
 
-      {/* Breadcrumb Navigation Bar */}
       <div className="breadcrumb-bar">
         <div className="breadcrumb-container">
           <button className="breadcrumb-home-link" onClick={onBackToHome}>
@@ -96,15 +134,12 @@ export const MatchPage = ({ matchId, initialTab = 'live', onBackToHome }) => {
         </div>
       </div>
 
-      {/* 2. Full-width Header Card */}
       <div className="match-header-wrapper">
         <MatchHeaderCard match={matchData} />
       </div>
 
-      {/* 3. Sub-nav Tab Bar */}
       <MatchTabs activeTab={activeTab} onSelectTab={handleTabChange} />
 
-      {/* 4. Two-column Main Content Area (left: tab content, right: side panel) */}
       <main className="match-main-content">
         {activeToast && (
           <div className="route-toast">
@@ -120,20 +155,17 @@ export const MatchPage = ({ matchId, initialTab = 'live', onBackToHome }) => {
         )}
 
         <div className="match-two-column-layout">
-          {/* Left Column: Active Tab Content */}
           <div className="match-left-column">
             {renderTabContent()}
           </div>
 
-          {/* Right Column: Match Details Side Panel */}
           <div className="match-right-column">
-            <MatchSidePanel 
-              match={matchData} 
-              onSimulateBall={handleSimulateBall} 
-            />
+            <MatchSidePanel match={matchData} />
           </div>
         </div>
       </main>
     </div>
   );
 };
+
+export default MatchPage;

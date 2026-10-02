@@ -7,9 +7,11 @@ import { MatchCard } from '../components/MatchCard';
 import { FloatingActionButton } from '../components/FloatingActionButton';
 import { PlaceholderTabContent } from '../components/PlaceholderTabContent';
 import { tournamentConfig, getTournamentMatches } from '../services/matchService';
+import { fetchMatches } from '../services/apiService';
+import { getSocket } from '../services/socketService';
+import { Plus } from 'lucide-react';
 
-export function HomePage({ onNavigateToMatch }) {
-  // Read initial view from URL query parameter ?view=live|upcoming|completed (default to 'live')
+export function HomePage({ onNavigateToMatch, onNavigateToAdminSetup }) {
   const getInitialView = () => {
     const params = new URLSearchParams(window.location.search);
     const viewParam = params.get('view');
@@ -22,11 +24,49 @@ export function HomePage({ onNavigateToMatch }) {
   const [activeTab, setActiveTab] = useState('matches');
   const [activeView, setActiveView] = useState(getInitialView);
   const [activeToast, setActiveToast] = useState(null);
+  const [matches, setMatches] = useState(() => getTournamentMatches(activeView));
 
-  // Derive matches list based on selected view
-  const matches = getTournamentMatches(activeView);
+  // Load matches from API
+  useEffect(() => {
+    fetchMatches(activeView)
+      .then(data => {
+        if (data && data.length > 0) {
+          setMatches(data);
+        }
+      })
+      .catch(() => {
+        // Fallback to static mock if backend starting up
+        setMatches(getTournamentMatches(activeView));
+      });
+  }, [activeView]);
 
-  // Handle URL query state updates without full page reloads
+  // Real-time sync via Socket.io 'match_summary'
+  useEffect(() => {
+    const socket = getSocket();
+
+    const handleMatchSummary = (summary) => {
+      setMatches(prev => {
+        const index = prev.findIndex(m => m.matchId === summary.matchId);
+        if (index !== -1) {
+          const updated = [...prev];
+          updated[index] = { ...updated[index], ...summary };
+          return updated;
+        } else {
+          // Add to top if it matches current activeView or is live
+          if (activeView === summary.status || activeView === 'live') {
+            return [summary, ...prev];
+          }
+          return prev;
+        }
+      });
+    };
+
+    socket.on('match_summary', handleMatchSummary);
+    return () => {
+      socket.off('match_summary', handleMatchSummary);
+    };
+  }, [activeView]);
+
   const handleViewChange = (newView) => {
     setActiveView(newView);
     const url = new URL(window.location.href);
@@ -34,7 +74,6 @@ export function HomePage({ onNavigateToMatch }) {
     window.history.pushState({}, '', url.toString());
   };
 
-  // Listen to popstate (browser back/forward button)
   useEffect(() => {
     const handlePopState = () => {
       const params = new URLSearchParams(window.location.search);
@@ -60,21 +99,20 @@ export function HomePage({ onNavigateToMatch }) {
 
   return (
     <div className="app-container">
-      {/* 1. Sticky Navigation Bar */}
+      {/* Sticky Navigation Bar */}
       <Navbar />
 
-      {/* 2. Full-Width Gradient Banner Section */}
+      {/* Full-Width Gradient Banner Section */}
       <TournamentBanner config={tournamentConfig} />
 
-      {/* 3. Sub-Nav Tab Bar */}
+      {/* Sub-Nav Tab Bar */}
       <SubNavTabs 
         activeTab={activeTab} 
         onSelectTab={(tabId) => setActiveTab(tabId)} 
       />
 
-      {/* 4. Main Content Area */}
+      {/* Main Content Area */}
       <main className="main-content">
-        {/* Navigation Toast Banner */}
         {activeToast && (
           <div className="route-toast">
             <span>{activeToast}</span>
@@ -88,16 +126,13 @@ export function HomePage({ onNavigateToMatch }) {
           </div>
         )}
 
-        {/* Tab Content rendering */}
         {activeTab === 'matches' ? (
           <>
-            {/* Live / Upcoming / Completed Segmented Switch */}
             <ViewSwitch 
               activeView={activeView} 
               onViewChange={handleViewChange} 
             />
 
-            {/* Match Cards Masonry Grid */}
             {matches.length > 0 ? (
               <div className="matches-masonry">
                 {matches.map((match) => (
@@ -121,9 +156,6 @@ export function HomePage({ onNavigateToMatch }) {
           />
         )}
       </main>
-
-      {/* 5. Floating Action Button (FAB) */}
-      <FloatingActionButton onNavigate={handleFabNavigate} />
     </div>
   );
 }

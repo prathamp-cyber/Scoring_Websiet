@@ -1,9 +1,18 @@
 import React from 'react';
-import { Trophy, MapPin, Share2, CheckCircle2, Clock } from 'lucide-react';
+import { Trophy, MapPin, Share2, CheckCircle2, Clock, Maximize2 } from 'lucide-react';
 
-export const MatchHeaderCard = ({ match, onShare }) => {
+export const MatchHeaderCard = ({ match, onShare, onFullscreen }) => {
   const isLive = match.status === 'live';
   const isCompleted = match.status === 'completed';
+
+  const handleFullscreenClick = () => {
+    if (onFullscreen) {
+      onFullscreen();
+    } else {
+      window.history.pushState({}, '', `/live/${match.matchId}/fullscreen`);
+      window.dispatchEvent(new Event('popstate'));
+    }
+  };
 
   const renderTeamLogo = (team) => {
     const color = team?.logoColor || '#64748b';
@@ -22,7 +31,7 @@ export const MatchHeaderCard = ({ match, onShare }) => {
       <div className="header-gradient-bar"></div>
 
       <div className="header-card-body">
-        {/* Top Row: Tournament, Round, Status Pill & Share Button */}
+        {/* Top Row: Tournament, Round, Status Pill & Action Buttons */}
         <div className="header-top-row">
           <div className="header-title-group">
             <Trophy size={16} className="header-trophy-icon" />
@@ -53,7 +62,16 @@ export const MatchHeaderCard = ({ match, onShare }) => {
             )}
 
             <button 
-              className="header-share-btn" 
+              className="header-action-icon-btn" 
+              onClick={handleFullscreenClick}
+              aria-label="Full-screen scoreboard"
+              title="Full-screen Scoreboard (TV Mode)"
+            >
+              <Maximize2 size={16} />
+            </button>
+
+            <button 
+              className="header-action-icon-btn" 
               onClick={onShare || (() => alert('Share link copied to clipboard!'))}
               aria-label="Share match"
               title="Share match"

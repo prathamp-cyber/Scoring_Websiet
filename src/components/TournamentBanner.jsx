@@ -53,16 +53,6 @@ export const TournamentBanner = ({ config }) => {
               <Calendar size={13} className="calendar-icon" />
               <span>{dateRange}</span>
             </div>
-
-            <div className="banner-action-row">
-              <button 
-                className="banner-contact-btn"
-                onClick={() => alert(`Contact tournament organizers: ${config?.contactEmail || 'organizer@mapl.com'}`)}
-              >
-                <Mail size={14} />
-                <span>Contact us</span>
-              </button>
-            </div>
           </div>
         </div>
 

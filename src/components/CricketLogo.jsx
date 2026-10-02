@@ -1,4 +1,5 @@
 import React from 'react';
+import { SITE_CONFIG } from '../config/siteConfig';
 
 export const CricketLogo = () => {
   return (
@@ -11,9 +12,8 @@ export const CricketLogo = () => {
         <path d="M25 9C20 13 20 19 25 23" stroke="#ffffff" strokeWidth="2" strokeLinecap="round" strokeDasharray="2 2" />
         <path d="M16 4V28" stroke="#ffffff" strokeWidth="2" strokeLinecap="round" strokeDasharray="2 2" />
       </svg>
-      <span style={{ fontSize: '22px', fontWeight: '800', letterSpacing: '-0.5px', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
-        <span style={{ color: '#1f2937' }}>cric</span>
-        <span style={{ color: '#ef4444' }}>heroes</span>
+      <span style={{ fontSize: '22px', fontWeight: '800', letterSpacing: '-0.5px', fontFamily: 'system-ui, -apple-system, sans-serif', color: '#1f2937' }}>
+        {SITE_CONFIG.appName}
       </span>
     </div>
   );

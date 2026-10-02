@@ -7,13 +7,18 @@ export const MatchSidePanel = ({ match, onSimulateBall }) => {
 
   const isLive = status === 'live';
 
+  // Only show simulate button if ?dev=1 is in URL params
+  const showDevTools = new URLSearchParams(window.location.search).get('dev') === '1';
+
   return (
     <aside className="match-side-panel">
-      {/* 1. Stat Row Card */}
+      {/* 1. Stat Row Card (Home Page Banner Style Stat Blocks) */}
       <div className="side-card stat-row-card">
         <div className="side-stat-box">
-          <span className="side-stat-val">{isLive ? sidePanel.currentRR : (sidePanel.currentRR || '-')}</span>
-          <span className="side-stat-lbl">Current RR</span>
+          <span className="side-stat-val">
+            {isLive ? sidePanel.currentRR : (sidePanel.currentRR || '-')}
+          </span>
+          <span className="side-stat-lbl">CURRENT RR</span>
         </div>
 
         <div className="side-stat-divider-line"></div>
@@ -23,7 +28,7 @@ export const MatchSidePanel = ({ match, onSimulateBall }) => {
             {isLive ? (sidePanel.requiredRR !== '-' ? sidePanel.requiredRR : sidePanel.projectedScore) : sidePanel.projectedScore}
           </span>
           <span className="side-stat-lbl">
-            {isLive && sidePanel.requiredRR !== '-' ? 'Required RR' : 'Projected Score'}
+            {isLive && sidePanel.requiredRR !== '-' ? 'REQUIRED RR' : 'PROJECTED SCORE'}
           </span>
         </div>
       </div>
@@ -38,13 +43,13 @@ export const MatchSidePanel = ({ match, onSimulateBall }) => {
       {/* 2. Match Details Card */}
       <div className="side-card details-card">
         <div className="side-card-header">
-          <h3 className="side-card-heading">Match details</h3>
+          <h3 className="side-card-heading">Match Details</h3>
         </div>
 
         <div className="side-details-content">
           {/* Series / Tournament Link */}
           <div className="side-info-row">
-            <span className="info-key">Series:</span>
+            <span className="info-key">Series</span>
             <a href={sidePanel.seriesLink || '#'} className="info-link">
               {sidePanel.seriesName}
             </a>
@@ -52,7 +57,7 @@ export const MatchSidePanel = ({ match, onSimulateBall }) => {
 
           {/* Date */}
           <div className="side-info-row">
-            <span className="info-key">Date:</span>
+            <span className="info-key">Date</span>
             <span className="info-val">
               <Calendar size={13} className="inline-side-icon" />
               {sidePanel.matchDate}
@@ -61,7 +66,7 @@ export const MatchSidePanel = ({ match, onSimulateBall }) => {
 
           {/* Location Link */}
           <div className="side-info-row">
-            <span className="info-key">Location:</span>
+            <span className="info-key">Location</span>
             <a href={sidePanel.locationLink || '#'} className="info-link">
               <MapPin size={13} className="inline-side-icon" />
               {sidePanel.location}
@@ -70,7 +75,7 @@ export const MatchSidePanel = ({ match, onSimulateBall }) => {
 
           {/* Last Updated */}
           <div className="side-info-row updated-block-row">
-            <span className="info-key">Last Updated:</span>
+            <span className="info-key">Last Updated</span>
             <div className="updated-text-block">
               <span className="scorer-name-text">{sidePanel.lastUpdatedScorer}</span>
               <span className="scorer-time-text">
@@ -82,15 +87,15 @@ export const MatchSidePanel = ({ match, onSimulateBall }) => {
         </div>
       </div>
 
-      {/* 3. Live Ball Simulator Button */}
-      {isLive && onSimulateBall && (
+      {/* 3. Dev-Only Live Ball Simulator Button */}
+      {showDevTools && isLive && onSimulateBall && (
         <div className="side-card simulator-card">
           <button className="simulate-ball-btn" onClick={onSimulateBall}>
             <Radio size={16} className="radio-pulse" />
             <span>Simulate Live Ball (+4 Runs)</span>
           </button>
           <p className="simulator-note">
-            Test real-time live score updates without page refresh
+            Dev-only tool: Test real-time score updates
           </p>
         </div>
       )}
