@@ -44,12 +44,23 @@ export function AdminSetupPage({ onNavigateToScoring, onBackToHome }) {
   const [showConfirmPin, setShowConfirmPin] = useState(false);
 
   const [errors, setErrors] = useState({});
-  const [submitting, setSubmitting] = useState(false);
+  const [fixtureError, setFixtureError] = useState(null);
 
   useEffect(() => {
     fetchFixtures()
-      .then(data => setFixtures(data))
-      .catch(() => {});
+      .then(data => {
+        if (Array.isArray(data)) {
+          setFixtures(data);
+          setFixtureError(null);
+        } else {
+          setFixtures([]);
+          setFixtureError('Could not load fixtures - using manual entry');
+        }
+      })
+      .catch(() => {
+        setFixtures([]);
+        setFixtureError('Could not load fixtures - using manual entry');
+      });
   }, []);
 
   useEffect(() => {
@@ -244,6 +255,11 @@ export function AdminSetupPage({ onNavigateToScoring, onBackToHome }) {
                       </option>
                     ))}
                   </select>
+                  {fixtureError && (
+                    <div className="fixture-error-subtext" style={{ fontSize: '12px', color: '#d97706', marginTop: '6px' }}>
+                      ⚠️ {fixtureError}
+                    </div>
+                  )}
                 </div>
 
                 <div className="form-grid-2col">

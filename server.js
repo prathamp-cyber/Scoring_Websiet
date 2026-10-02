@@ -1106,6 +1106,36 @@ app.post('/api/matches/:id/start-second-innings', (req, res) => {
   res.json({ success: true, state: computed.fullMatchState });
 });
 
+// GET /api/fixtures - Fetch pre-configured tournament fixtures
+app.get('/api/fixtures', (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const fixtures = [
+      {
+        id: 'fix-101',
+        tournamentName: 'MAPL 2026',
+        groupLabel: 'Quarter Final 1',
+        teamA: 'SIPL WARRIORS',
+        teamB: 'KANDLA TIGERS',
+        squadA: ['Rajesh Patel', 'Devendra Jadeja', 'Amit Sharma', 'Pritesh Shah', 'Hardik Vora', 'Bhavin Solanki', 'Ketan Joshi', 'Sanjay Mehta', 'Sunil Gadhvi', 'Nilesh Ahir', 'Jayesh Patel'],
+        squadB: ['Vikram Rathod', 'Harish Parmar', 'Girish Kothari', 'Ramesh Solanki', 'Chetan Thakar', 'Mahesh Dave', 'Haresh Bhanushali', 'Mayur Shah', 'Pratik Chawda', 'Dharmendra K', 'Manish Maheshwari']
+      },
+      {
+        id: 'fix-102',
+        tournamentName: 'MAPL 2026',
+        groupLabel: 'Quarter Final 2',
+        teamA: 'GANDHIDHAM SUPER KINGS',
+        teamB: 'KUTCH ROYAL STRIKERS',
+        squadA: ['Aarav Patel', 'Vivan Shah', 'Aditya Joshi'],
+        squadB: ['Rohan Mehta', 'Yash Varma', 'Karan Solanki']
+      }
+    ];
+    res.json(fixtures);
+  } catch (err) {
+    res.json([]);
+  }
+});
+
 // Seed default fixtures if database is empty
 function seedDefaultData() {
   const matchCount = db.prepare('SELECT COUNT(*) as count FROM matches').get().count;

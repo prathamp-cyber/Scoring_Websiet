@@ -15,9 +15,24 @@ export async function fetchMatchState(matchId) {
 }
 
 export async function fetchFixtures() {
-  const res = await fetch('/api/fixtures');
-  if (!res.ok) throw new Error('Failed to fetch fixtures');
-  return res.json();
+  try {
+    const res = await fetch('/api/fixtures');
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: Failed to fetch fixtures`);
+    }
+    const contentType = res.headers.get('content-type');
+    if (!contentType || !contentType.includes('application/json')) {
+      throw new Error('Response is not JSON format');
+    }
+    const text = await res.text();
+    if (!text || !text.trim()) {
+      return [];
+    }
+    return JSON.parse(text);
+  } catch (err) {
+    console.warn('fetchFixtures failed:', err.message);
+    throw err;
+  }
 }
 
 export async function createMatch(payload) {
