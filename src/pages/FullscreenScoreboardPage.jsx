@@ -1,23 +1,28 @@
 import React, { useState, useEffect } from 'react';
-import { CricketLogo } from '../components/CricketLogo';
-import { Minimize2, Trophy } from 'lucide-react';
+import { Minimize2, Maximize2 } from 'lucide-react';
 import { getMatchDetail } from '../services/matchDetailService';
 import { fetchMatchState } from '../services/apiService';
 import { getSocket } from '../services/socketService';
 
 export function FullscreenScoreboardPage({ matchId, onExit }) {
   const [matchData, setMatchData] = useState(() => getMatchDetail(matchId));
+  const [isFullscreen, setIsFullscreen] = useState(!!document.fullscreenElement);
 
   useEffect(() => {
     fetchMatchState(matchId)
-      .then(state => { if (state) setMatchData(state); })
+      .then(state => {
+        if (state) {
+          const fallback = getMatchDetail(matchId);
+          setMatchData({ ...fallback, ...state });
+        }
+      })
       .catch(() => {});
 
     const socket = getSocket();
     socket.emit('join_room', matchId);
 
     const handleStateUpdate = (newState) => {
-      setMatchData(newState);
+      setMatchData(prev => ({ ...prev, ...newState }));
     };
 
     socket.on('state', handleStateUpdate);
@@ -28,7 +33,26 @@ export function FullscreenScoreboardPage({ matchId, onExit }) {
     };
   }, [matchId]);
 
+  useEffect(() => {
+    const handleFsChange = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', handleFsChange);
+    return () => document.removeEventListener('fullscreenchange', handleFsChange);
+  }, []);
+
+  const toggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    } else {
+      if (document.exitFullscreen) {
+        document.exitFullscreen().catch(() => {});
+      }
+    }
+  };
+
   const handleExitClick = () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
     if (onExit) {
       onExit();
     } else {
@@ -37,195 +61,83 @@ export function FullscreenScoreboardPage({ matchId, onExit }) {
     }
   };
 
-  const { teamA, teamB, liveData, status, resultText } = matchData;
-  const currentBatters = liveData?.currentBatters || [];
-  const currentBowler = liveData?.currentBowler || {};
+  const { teamA, teamB, liveData } = matchData;
+  const battingTeam = teamB?.isBatting ? teamB : (teamA?.isBatting ? teamA : teamB);
+  const bowlingTeam = battingTeam === teamB ? teamA : teamB;
+
+  const scoreText = battingTeam?.score || '0/0';
+  const rawOvers = battingTeam?.overs || '0.0';
+  const cleanOvers = rawOvers.toString().replace(/ov/gi, '').trim();
+  const oversText = `(${cleanOvers} Ov)`;
   const recentBalls = liveData?.recentBalls || [];
 
   const renderBallChip = (item, idx) => {
     if (item.type === 'over_boundary' || item.label === 'divider') {
-      return <div key={`div-${idx}`} className="fs-ball-divider">|</div>;
+      return <div key={`div-${idx}`} className="minimal-fs-divider">|</div>;
     }
 
-    let chipClass = 'fs-chip-gray';
-    if (item.val === '4' || item.type === 'four') chipClass = 'fs-chip-blue';
-    else if (item.val === '6' || item.type === 'six') chipClass = 'fs-chip-green';
-    else if (item.val === 'W' || item.type === 'wicket') chipClass = 'fs-chip-red';
-    else if (item.type === 'wide' || item.type === 'noball') chipClass = 'fs-chip-amber';
+    let chipClass = 'minimal-fs-chip-gray';
+    if (item.val === '4' || item.type === 'four') chipClass = 'minimal-fs-chip-blue';
+    else if (item.val === '6' || item.type === 'six') chipClass = 'minimal-fs-chip-green';
+    else if (item.val === 'W' || item.type === 'wicket') chipClass = 'minimal-fs-chip-red';
+    else if (item.type === 'wide' || item.type === 'noball' || item.val === 'Wd' || item.val === 'Nb') chipClass = 'minimal-fs-chip-amber';
 
     return (
-      <span key={`fs-ball-${idx}`} className={`fs-ball-chip ${chipClass}`}>
+      <span key={`fs-ball-${idx}`} className={`minimal-fs-chip ${chipClass}`}>
         {item.val}
       </span>
     );
   };
 
   return (
-    <div className="fullscreen-scoreboard-page">
-      {/* Top Header Bar */}
-      <header className="fs-top-bar">
-        <div className="fs-logo-group">
-          <CricketLogo />
-          <span className="fs-tournament-tag">
-            <Trophy size={18} color="#d97706" /> {matchData.tournamentName}
+    <div className="minimal-fullscreen-scoreboard">
+      {/* Floating Exit & Browser Fullscreen Toggle */}
+      <div className="minimal-fs-controls">
+        <button 
+          className="minimal-fs-control-btn" 
+          onClick={toggleFullscreen} 
+          title={isFullscreen ? 'Exit Browser Fullscreen' : 'Enter Browser Fullscreen'}
+        >
+          {isFullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
+        </button>
+        <button 
+          className="minimal-fs-control-btn exit-btn" 
+          onClick={handleExitClick} 
+          title="Exit Fullscreen Mode"
+        >
+          <span>Exit</span>
+        </button>
+      </div>
+
+      {/* CENTERED CONTENT GROUP */}
+      <div className="minimal-fs-content-group">
+        {/* 1. TOP CENTER: BOTH TEAM NAMES */}
+        <div className="minimal-fs-teams-header">
+          <span className={`minimal-fs-team-name ${bowlingTeam?.isBatting ? 'is-batting' : ''}`}>
+            {bowlingTeam?.name}
+          </span>
+          <span className="minimal-fs-vs-label">vs</span>
+          <span className={`minimal-fs-team-name ${battingTeam?.isBatting ? 'is-batting' : ''}`}>
+            {battingTeam?.name}
+            {battingTeam?.isBatting && <span className="minimal-fs-batting-dot" title="Currently Batting">•</span>}
           </span>
         </div>
 
-        <div className="fs-header-center">
-          <span className="fs-live-badge">
-            <span className="live-dot-pulse"></span> LIVE SCOREBOARD
-          </span>
-          <span className="fs-ground-text">{matchData.ground}, {matchData.city}</span>
+        {/* 2. CENTER OF SCREEN: DOMINANT SCORE & OVERS */}
+        <div className="minimal-fs-score-container">
+          <span className="minimal-fs-runs-wickets">{scoreText}</span>
+          <span className="minimal-fs-overs">{oversText}</span>
         </div>
 
-        <div className="fs-header-actions">
-          <button className="fs-exit-btn" onClick={handleExitClick} title="Exit Fullscreen">
-            <Minimize2 size={18} />
-            <span>Exit Fullscreen</span>
-          </button>
+        {/* 3. BELOW THAT: OVER-BY-OVER TIMELINE CHIPS */}
+        <div className="minimal-fs-timeline-container">
+          {recentBalls.length > 0 ? (
+            recentBalls.map((item, idx) => renderBallChip(item, idx))
+          ) : (
+            <span className="minimal-fs-no-balls">Current over starting...</span>
+          )}
         </div>
-      </header>
-
-      {/* Main Scoreboard Body */}
-      <main className="fs-main-body">
-        {/* Teams & Scores Row */}
-        <section className="fs-teams-grid">
-          {/* Team A */}
-          <div className={`fs-team-card ${teamA.isBatting ? 'is-active-batting' : ''}`}>
-            <div className="fs-team-left">
-              <div className="fs-team-avatar" style={{ backgroundColor: teamA.logoColor || '#dc2626' }}>
-                {teamA.logoText || teamA.name.charAt(0)}
-              </div>
-              <div>
-                <h2 className="fs-team-name">{teamA.name}</h2>
-                <span className="fs-batting-tag">{teamA.isBatting ? '⚡ BATTING NOW' : 'INNINGS'}</span>
-              </div>
-            </div>
-
-            <div className="fs-team-score-box">
-              {teamA.hasBatted && teamA.score ? (
-                <>
-                  <span className="fs-score-main">{teamA.score}</span>
-                  {teamA.overs && <span className="fs-overs-sub">({teamA.overs} ov)</span>}
-                </>
-              ) : (
-                <span className="fs-yet-to-bat">Yet to bat</span>
-              )}
-            </div>
-          </div>
-
-          {/* Team B */}
-          <div className={`fs-team-card ${teamB.isBatting ? 'is-active-batting' : ''}`}>
-            <div className="fs-team-left">
-              <div className="fs-team-avatar" style={{ backgroundColor: teamB.logoColor || '#059669' }}>
-                {teamB.logoText || teamB.name.charAt(0)}
-              </div>
-              <div>
-                <h2 className="fs-team-name">{teamB.name}</h2>
-                <span className="fs-batting-tag">{teamB.isBatting ? '⚡ BATTING NOW' : 'INNINGS'}</span>
-              </div>
-            </div>
-
-            <div className="fs-team-score-box">
-              {teamB.hasBatted && teamB.score ? (
-                <>
-                  <span className="fs-score-main">{teamB.score}</span>
-                  {teamB.overs && <span className="fs-overs-sub">({teamB.overs} ov)</span>}
-                </>
-              ) : (
-                <span className="fs-yet-to-bat">Yet to bat</span>
-              )}
-            </div>
-          </div>
-        </section>
-
-        {/* Chase Target / Match Result Banner */}
-        {status === 'live' && matchData.chaseStatusText && (
-          <div className="fs-status-banner chase">
-            <span>⚡ {matchData.chaseStatusText}</span>
-          </div>
-        )}
-
-        {status === 'completed' && (resultText || matchData.resultText) && (
-          <div className="fs-status-banner result">
-            <span>🏆 {resultText || matchData.resultText}</span>
-          </div>
-        )}
-
-        {/* Players Grid: Batters & Bowler */}
-        <section className="fs-players-grid">
-          {/* Striker Card */}
-          {currentBatters[0] && (
-            <div className="fs-player-card striker">
-              <div className="fs-player-role">STRIKER *</div>
-              <h3 className="fs-player-name">{currentBatters[0].name}</h3>
-              <div className="fs-player-stats">
-                <span className="fs-main-num">{currentBatters[0].runs}</span>
-                <span className="fs-sub-num">({currentBatters[0].balls}b)</span>
-              </div>
-              <div className="fs-player-meta">
-                <span>4s: <strong>{currentBatters[0].fours}</strong></span>
-                <span>•</span>
-                <span>6s: <strong>{currentBatters[0].sixes}</strong></span>
-                <span>•</span>
-                <span>SR: <strong>{currentBatters[0].sr}</strong></span>
-              </div>
-            </div>
-          )}
-
-          {/* Non-Striker Card */}
-          {currentBatters[1] && (
-            <div className="fs-player-card non-striker">
-              <div className="fs-player-role">NON-STRIKER</div>
-              <h3 className="fs-player-name">{currentBatters[1].name}</h3>
-              <div className="fs-player-stats">
-                <span className="fs-main-num">{currentBatters[1].runs}</span>
-                <span className="fs-sub-num">({currentBatters[1].balls}b)</span>
-              </div>
-              <div className="fs-player-meta">
-                <span>4s: <strong>{currentBatters[1].fours}</strong></span>
-                <span>•</span>
-                <span>6s: <strong>{currentBatters[1].sixes}</strong></span>
-                <span>•</span>
-                <span>SR: <strong>{currentBatters[1].sr}</strong></span>
-              </div>
-            </div>
-          )}
-
-          {/* Current Bowler Card */}
-          {currentBowler && (
-            <div className="fs-player-card bowler">
-              <div className="fs-player-role bowler-role">CURRENT BOWLER</div>
-              <h3 className="fs-player-name">{currentBowler.name}</h3>
-              <div className="fs-player-stats">
-                <span className="fs-main-num">{currentBowler.wickets} - {currentBowler.runs}</span>
-                <span className="fs-sub-num">({currentBowler.overs} ov)</span>
-              </div>
-              <div className="fs-player-meta">
-                <span>Econ: <strong>{currentBowler.econ}</strong></span>
-                {currentBowler.maidens > 0 && (
-                  <>
-                    <span>•</span>
-                    <span>Maidens: <strong>{currentBowler.maidens}</strong></span>
-                  </>
-                )}
-              </div>
-            </div>
-          )}
-        </section>
-
-        {/* Recent Balls Outcome Chips */}
-        <section className="fs-recent-balls-bar">
-          <span className="fs-recent-label">THIS OVER:</span>
-          <div className="fs-chips-row">
-            {recentBalls.length > 0 ? (
-              recentBalls.map((item, idx) => renderBallChip(item, idx))
-            ) : (
-              <span className="fs-empty-balls">Over starting...</span>
-            )}
-          </div>
-        </section>
-      </main>
+      </div>
     </div>
   );
 }
